@@ -33,10 +33,34 @@
       <p>{error}</p>
     </div>
 
-    <div>
+    <div class="page">
       {#each sorted(events) as event (event.id)}
         <EEW content={event.content}></EEW>
       {/each}
+      <a
+        href="/"
+        class="info-button d-flex align-items-center justify-content-center"
+      >
+        ？
+      </a>
     </div>
   </UniqueEventList>
 </NostrApp>
+
+<style>
+  .info-button {
+    font-family: "LINE_SEED_Eb";
+    font-size: 1.5rem;
+    display: inline-block;
+    position: absolute;
+    right: 20px;
+    bottom: 20px;
+    height: 64px;
+    width: 64px;
+    border-radius: 50px;
+    background-color: #333;
+    border: 1px solid #9299a0;
+    color: #9299a0;
+    text-decoration: none;
+  }
+</style>
