@@ -1,34 +1,48 @@
 @font-face {
   font-family: "LINE_SEED_Eb";
-  src:
-    url("/LINESeedJP_OTF_Eb.woff") format("woff"),
+  src: url("/LINESeedJP_OTF_Eb.woff") format("woff");
 }
 @font-face {
   font-family: "LINE_SEED_Bd";
-  src:
-    url("/LINESeedJP_OTF_Bd.woff") format("woff"),
+  src: url("/LINESeedJP_OTF_Bd.woff") format("woff");
 }
 @font-face {
   font-family: "LINE_SEED_Rg";
-  src:
-    url("/LINESeedJP_OTF_Rg.woff") format("woff"),
+  src: url("/LINESeedJP_OTF_Rg.woff") format("woff");
 }
 @font-face {
   font-family: "LINE_SEED_Th";
-  src:
-    url("/LINESeedJP_OTF_Th.woff") format("woff"),
+  src: url("/LINESeedJP_OTF_Th.woff") format("woff");
 }
 
 body {
   font-family: "LINE_SEED_Rg";
+  line-height: 1.5;
 }
 
-.font-bold {
+.font-weight-bd {
   font-family: "LINE_SEED_Bd";
 }
 
-.font-bold-max {
+.font-weight-eb {
   font-family: "LINE_SEED_Eb";
+}
+
+.font-size-1 {
+  font-size: clamp(3.5rem, calc(20vw), 8.5rem);
+  line-height: 1.8;
+}
+
+.font-size-2 {
+  font-size: clamp(2rem, calc(10vw), 4.5rem);
+}
+
+.font-size-3 {
+  font-size: clamp(1rem, calc(5vw + 0.6rem), 2.5rem);
+}
+
+.font-size-4 {
+  font-size: clamp(1rem, calc(4vw + 0.2rem), 1.8rem);
 }
 
 .page {
@@ -37,4 +51,19 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.info-button {
+  font-family: "LINE_SEED_Eb";
+  font-size: clamp(1rem, calc(5vw + 0.6rem), 2rem);
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  height: clamp(2rem, calc(10vw + 1.2rem), 4rem);
+  width: clamp(2rem, calc(10vw + 1.2rem), 4rem);
+  border-radius: 50px;
+  // background-color: #333;
+  // border: 1px solid #9299a0;
+  // color: #9299a0;
+  // text-decoration: none;
 }
