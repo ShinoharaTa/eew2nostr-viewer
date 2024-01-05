@@ -1,5 +1,5 @@
 {
-  "name": "learning-nostr-web-app",
+  "name": "eew2nostr-viewer",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -31,7 +31,6 @@
     "vite": "^4.3.0"
   },
   "dependencies": {
-    "bootstrap": "^5.3.2",
     "date-fns": "^2.30.0",
     "nostr-tools": "^1.12.1",
     "nosvelte": "^0.1.3",
