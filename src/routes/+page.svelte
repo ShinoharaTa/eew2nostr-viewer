@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { NostrApp, UniqueEventList, Metadata, Nostr } from "nosvelte";
+  import { NostrApp, UniqueEventList, Nostr } from "nosvelte";
   import { createRxForwardReq } from "rx-nostr";
   import "websocket-polyfill";
 
@@ -11,6 +11,9 @@
   const sorted = (events: Nostr.Event[]) => {
     return [...events].sort((a, b) => b.created_at - a.created_at);
   };
+  const first = (events: Nostr.Event[]) => {
+    return events[0];
+  }
 </script>
 
 <NostrApp {relays}>
@@ -34,9 +37,7 @@
     </div>
 
     <div class="page">
-      {#each sorted(events) as event (event.id)}
-        <EEW content={event.content}></EEW>
-      {/each}
+      <EEW content={first(sorted(events)).content}></EEW>
       <!-- <button class="btn btn-secondary info-button"> ？ </button> -->
     </div>
   </UniqueEventList>
