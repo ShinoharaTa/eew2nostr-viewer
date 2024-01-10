@@ -13,7 +13,7 @@
   };
   const first = (events: Nostr.Event[]) => {
     return events[0];
-  }
+  };
 </script>
 
 <NostrApp {relays}>
@@ -23,6 +23,9 @@
       {
         kinds: [30078],
         "#d": ["eew_alert_system_by_shino3"],
+        authors: [
+          "npub1p92agfqsynk3lv8mturqwaq68wpvat55qsf72e3j97wkrnyy9hhsxczd3x",
+        ],
       },
     ]}
     {req}
