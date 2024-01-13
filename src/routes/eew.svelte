@@ -44,7 +44,7 @@
   </div>
   <div class="font-size-4">
     北緯 {item.latitude}度、東経 {item.longitude}度<br />深さ {Math.abs(
-      item.depth / 1000,
+      item.depth,
     )}km
   </div>
 </div>
