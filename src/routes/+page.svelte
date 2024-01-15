@@ -1,22 +1,25 @@
 <script lang="ts">
-  import { NostrApp, UniqueEventList, Nostr } from "nosvelte";
-  import { createRxForwardReq } from "rx-nostr";
-  import "websocket-polyfill";
+  // import { NostrApp, UniqueEventList, Nostr } from "nosvelte";
+  import { createRxNostr } from "rx-nostr";
+  import { rxNostr } from "$lib/main";
+  // import "websocket-polyfill";
 
   // components
   import EEW from "./eew.svelte";
 
-  const req = createRxForwardReq();
+  // const rxNostr = createRxNostr();
   const relays: string[] = ["wss://relay-jp.shino3.net", "wss://r.kojira.io"];
-  const sorted = (events: Nostr.Event[]) => {
-    return [...events].sort((a, b) => b.created_at - a.created_at);
-  };
-  const first = (events: Nostr.Event[]) => {
-    return events[0];
-  };
+  rxNostr.setRelays(relays);
+
+  // const sorted = (events: Nostr.Event[]) => {
+  //   return [...events].sort((a, b) => b.created_at - a.created_at);
+  // };
+  // const first = (events: Nostr.Event[]) => {
+  //   return events[0];
+  // };
 </script>
 
-<NostrApp {relays}>
+<!-- <NostrApp {relays}>
   <UniqueEventList
     queryKey={[]}
     filters={[
@@ -41,7 +44,7 @@
 
     <div class="page">
       <EEW content={first(sorted(events)).content}></EEW>
-      <!-- <button class="btn btn-secondary info-button"> ？ </button> -->
+      <button class="btn btn-secondary info-button"> ？ </button>
     </div>
   </UniqueEventList>
-</NostrApp>
+</NostrApp> -->
