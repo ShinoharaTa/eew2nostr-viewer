@@ -6,16 +6,16 @@
     if (item.forecast === "7") {
       return "text-danger";
     }
-    if (item.forecast === "6強") {
+    if (item.forecast === "6+") {
       return "text-danger";
     }
-    if (item.forecast === "6弱") {
+    if (item.forecast === "6-") {
       return "text-danger";
     }
-    if (item.forecast === "5強") {
+    if (item.forecast === "5+") {
       return "text-warning";
     }
-    if (item.forecast === "5弱") {
+    if (item.forecast === "5-") {
       return "text-warning";
     }
     if (item.forecast === "4") {
