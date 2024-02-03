@@ -1,8 +1,8 @@
 <script lang="ts">
   import { parseISO, format } from "date-fns";
   export let content: string = "";
-  const item = JSON.parse(content);
-  const fontColor = () => {
+  $: item = JSON.parse(content);
+  $: fontColor = () => {
     if (item.forecast === "7") {
       return "text-danger";
     }
