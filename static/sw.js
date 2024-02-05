@@ -1,16 +1,13 @@
 const CACHE_VERSION = "v1";
 const CACHE_NAME = `${registration.scope}!${CACHE_VERSION}`;
+const MAX_AGE_SECONDS = 3600; // 1時間のキャッシュ時間
 
 // キャッシュするファイルをセットする
-const urlsToCache = [
-  ".",
-];
+const urlsToCache = ["."];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    // キャッシュを開く
     caches.open(CACHE_NAME).then((cache) => {
-      // 指定されたファイルをキャッシュに追加する
       return cache.addAll(urlsToCache);
     })
   );
@@ -18,55 +15,57 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((cacheNames) => {
-        return cacheNames.filter((cacheName) => {
-          // このスコープに所属していて且つCACHE_NAMEではないキャッシュを探す
-          return (
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cacheName) => {
+          if (
             cacheName.startsWith(`${registration.scope}!`) &&
             cacheName !== CACHE_NAME
-          );
-        });
-      })
-      .then((cachesToDelete) => {
-        return Promise.all(
-          cachesToDelete.map((cacheName) => {
-            // いらないキャッシュを削除する
+          ) {
             return caches.delete(cacheName);
-          })
-        );
-      })
+          }
+        })
+      );
+    })
   );
 });
 
 self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  const isCacheable = url.pathname.match(/\.(png|ico|woff)$/);
+
   event.respondWith(
     caches.match(event.request).then((response) => {
-      // キャッシュ内に該当レスポンスがあれば、それを返す
       if (response) {
-        return response;
+        const headers = response.headers;
+        const date = headers.get("date");
+        const ageSeconds = date
+          ? (Date.now() - new Date(date).getTime()) / 1000
+          : MAX_AGE_SECONDS + 1;
+        if (ageSeconds < MAX_AGE_SECONDS) {
+          return response; // キャッシュが新しい場合は、キャッシュからレスポンスを返す
+        }
+        // キャッシュが古い場合は、後続の処理で新しいコンテンツを取得
       }
 
-      // 重要：リクエストを clone する。リクエストは Stream なので
-      // 一度しか処理できない。ここではキャッシュ用、fetch 用と2回
-      // 必要なので、リクエストは clone しないといけない
-      let fetchRequest = event.request.clone();
-
-      return fetch(fetchRequest).then((response) => {
+      return fetch(event.request.clone()).then((response) => {
         if (!response || response.status !== 200 || response.type !== "basic") {
-          // キャッシュする必要のないタイプのレスポンスならそのまま返す
           return response;
         }
 
-        // 重要：レスポンスを clone する。レスポンスは Stream で
-        // ブラウザ用とキャッシュ用の2回必要。なので clone して
-        // 2つの Stream があるようにする
-        let responseToCache = response.clone();
-
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
+        const responseToCache = response.clone();
+        if (isCacheable) {
+          caches.open(CACHE_NAME).then((cache) => {
+            const headers = { date: new Date().toUTCString() };
+            cache.put(
+              event.request,
+              new Response(responseToCache.body, {
+                ...responseToCache,
+                headers,
+              })
+            );
+          });
+        }
 
         return response;
       });
