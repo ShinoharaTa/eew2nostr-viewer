@@ -3,7 +3,7 @@ const CACHE_NAME = `${registration.scope}!${CACHE_VERSION}`;
 const MAX_AGE_SECONDS = 3600; // 1時間のキャッシュ時間
 
 // キャッシュするファイルをセットする
-const urlsToCache = ["."];
+const urlsToCache = [""];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

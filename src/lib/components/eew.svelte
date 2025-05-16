@@ -1,6 +1,6 @@
 <script lang="ts">
   import { parseISO, format } from "date-fns";
-  export let content: string = "";
+  export let content = "";
   $: item = JSON.parse(content);
   $: fontColor = () => {
     if (item.forecast === "7") {
