@@ -64,6 +64,13 @@ export let selected: boolean
   background-color: #2a2a2a;
   transition: all 0.2s ease;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    padding: 0.75rem;
+    margin: 0.25rem 0;
+    min-height: 60px;
+  }
+  
   &:hover {
     border-color: #525252;
     background-color: #323232;
@@ -82,6 +89,12 @@ export let selected: boolean
   align-items: center;
   margin-right: 0.75rem;
   min-width: 50px;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    margin-right: 1rem;
+    min-width: 60px;
+  }
 }
 
 .forecast {
@@ -91,12 +104,23 @@ export let selected: boolean
   text-align: center;
   font-weight: bold;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 1.5rem;
+    line-height: 1.2;
+  }
+  
   .undefined {
     font-size: 0.875rem;
     color: #9ca3af;
     background-color: #374151;
     padding: 0.125rem 0.375rem;
     border-radius: 3px;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 1rem;
+    }
   }
   
   .intensity-4 {
@@ -129,6 +153,11 @@ export let selected: boolean
   .intensity-note {
     font-size: 0.625rem;
     margin-left: 0.125rem;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 0.75rem;
+    }
   }
 }
 
@@ -139,9 +168,19 @@ export let selected: boolean
   text-align: center;
   line-height: 1.1;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 1.5rem;
+  }
+  
   .magnitude-prefix {
     font-size: 0.875rem;
     opacity: 0.8;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 1rem;
+    }
   }
 }
 
@@ -157,6 +196,12 @@ export let selected: boolean
   padding: 0.0625rem 0.25rem;
   border-radius: 2px;
   font-family: monospace;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 0.625rem;
+    padding: 0.125rem 0.375rem;
+  }
 }
 
 .magnitude {
@@ -165,6 +210,11 @@ export let selected: boolean
   text-align: center;
   margin-top: 0.125rem;
   font-family: monospace;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 0.75rem;
+  }
 }
 
 .details-section {
@@ -180,6 +230,15 @@ export let selected: boolean
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+    white-space: normal;
+    word-wrap: break-word;
+    line-height: 1.3;
+  }
 }
 
 .metadata {
@@ -187,14 +246,23 @@ export let selected: boolean
   flex-direction: column;
   gap: 0.0625rem;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    gap: 0.125rem;
+  }
+  
   .time, .depth {
     font-size: 0.625rem;
     color: #9ca3af;
     font-family: monospace;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 0.75rem;
+    }
   }
 }
 
-/* ダークテーマでの可読性向上 */
 @media (prefers-color-scheme: dark) {
   .intensity-7 {
     background-color: #450a0a;

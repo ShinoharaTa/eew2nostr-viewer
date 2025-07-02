@@ -68,11 +68,22 @@ $: forecast = (() => {
   max-width: 500px;
   margin: 0 auto;
   padding: 0.8em 0 1.5em;
-  // border-top: 1px solid #888
+  /* border-top: 1px solid #888 */
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    max-width: 100%;
+    padding: 0.5em 0 1em;
+  }
 }
 
 .forecast {
   font-size: 7rem;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 4rem;
+  }
 }
 
 /* 震度不明時：マグニチュード優先表示 */
@@ -81,15 +92,31 @@ $: forecast = (() => {
   font-size: 7rem;
   margin: 1rem 0;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 4rem;
+    margin: 0.5rem 0;
+  }
+  
   .magnitude-prefix {
     font-size: 4rem;
     opacity: 0.8;
     vertical-align: super;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 2.5rem;
+    }
   }
   
   .magnitude-value {
     font-size: 7rem;
     font-family: "LINE_SEED_Eb";
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 4rem;
+    }
   }
 }
 
@@ -98,6 +125,12 @@ $: forecast = (() => {
   font-family: "LINE_SEED_Bd";
   color: #9ca3af;
   margin-bottom: 1rem;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+  }
 }
 
 /* 震度あり時：震度数字優先表示 */
@@ -105,15 +138,31 @@ $: forecast = (() => {
   font-family: "LINE_SEED_Bd";
   margin: 1rem 0;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    margin: 0.5rem 0;
+  }
+  
   .intensity-label {
     font-size: 2.5rem;
     opacity: 0.7;
     margin-right: 0.5rem;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 1.5rem;
+      margin-right: 0.25rem;
+    }
   }
   
   .intensity-value {
     font-size: 7rem;
     font-family: "LINE_SEED_Eb";
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      font-size: 4rem;
+    }
   }
 }
 
@@ -122,5 +171,26 @@ $: forecast = (() => {
   font-family: "LINE_SEED_Bd";
   color: #6b7280;
   margin-bottom: 1rem;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+}
+
+/* モバイル対応：日時・地名・座標の調整 */
+@media (max-width: 768px) {
+  .fs-2 {
+    font-size: 1.25rem !important;
+  }
+  
+  .fs-1 {
+    font-size: 1.5rem !important;
+  }
+  
+  .fs-4 {
+    font-size: 0.875rem !important;
+  }
 }
 </style>

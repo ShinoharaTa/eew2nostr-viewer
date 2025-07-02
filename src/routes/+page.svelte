@@ -5,7 +5,7 @@ import EEWItem from "$lib/components/main/eewItem.svelte";
 import EEWDetail from "$lib/components/main/eewDetail.svelte";
 import EEWLatest from "$lib/components/main/latestEewDetail.svelte";
 import { SimplePool } from "nostr-tools/pool";
-import { onMount } from "svelte";
+import { onMount, onDestroy } from "svelte";
 
 const pool = new SimplePool();
 const relays = [
@@ -18,6 +18,7 @@ const now = getUnixTime(new Date());
 const yesterday = getUnixTime(subDays(new Date(), 7));
 let eews: Map<string, Event[]> = new Map();
 let selectedId: string | null = null;
+let isMobileMenuOpen = false; // モバイルメニューの開閉状態
 $: eewEntries = Array.from(eews.entries()) as [string, Event[]][];
 
 // selectedIdとeewsマップの両方に依存するリアクティブ計算
@@ -63,6 +64,23 @@ $: {
 	}
 }
 
+// メニュー開閉関数
+function toggleMobileMenu() {
+	isMobileMenuOpen = !isMobileMenuOpen;
+}
+
+function closeMobileMenu() {
+	isMobileMenuOpen = false;
+}
+
+// EEW選択時にモバイルメニューを閉じる
+function selectEEW(id: string) {
+	selectedId = id;
+	if (window.innerWidth <= 768) {
+		closeMobileMenu();
+	}
+}
+
 const filter = {
 	kinds: [7078],
 	"#d": ["eew_alert_system_by_shino3"],
@@ -77,7 +95,31 @@ onMount(() => {
 			eews = new Map(eews);
 		},
 	});
+	
+	// イベントリスナーの追加
+	window.addEventListener('keydown', handleKeydown);
+	window.addEventListener('resize', handleResize);
 });
+
+onDestroy(() => {
+	// イベントリスナーのクリーンアップ
+	window.removeEventListener('keydown', handleKeydown);
+	window.removeEventListener('resize', handleResize);
+});
+
+// キーボードイベントハンドラ
+function handleKeydown(event: KeyboardEvent) {
+	if (event.key === 'Escape' && isMobileMenuOpen) {
+		closeMobileMenu();
+	}
+}
+
+// ウィンドウリサイズ時の処理
+function handleResize() {
+	if (window.innerWidth > 768 && isMobileMenuOpen) {
+		closeMobileMenu();
+	}
+}
 </script>
 
 <!-- <div class="top-right-checkbox form-check">
@@ -99,13 +141,26 @@ onMount(() => {
   </UniqueEventList>
 </NostrApp> -->
 <div class="admin-console">
-  <div class="sidebar">
+  <!-- モバイル用オーバーレイ -->
+  {#if isMobileMenuOpen}
+    <div class="mobile-overlay" on:click={closeMobileMenu}></div>
+  {/if}
+
+  <!-- サイドバー -->
+  <div class="sidebar" class:mobile-open={isMobileMenuOpen}>
     <div class="sidebar-header">
       <h2>EEW 一覧</h2>
       <div class="status-indicator">
         <span class="status-dot"></span>
         受信中
       </div>
+      <!-- モバイル用閉じるボタン -->
+      <button class="mobile-close-btn" on:click={closeMobileMenu}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
     </div>
     <div class="eew-list">
       {#if eewEntries.length > 0}
@@ -113,7 +168,7 @@ onMount(() => {
           <div 
             class="eew-item-wrapper" 
             class:selected={selectedId === item.id}
-            on:click={() => (selectedId = item.id)}
+            on:click={() => selectEEW(item.id)}
           >
             <EEWItem {item} selected={selectedId === item.id}></EEWItem>
           </div>
@@ -126,8 +181,17 @@ onMount(() => {
     </div>
   </div>
 
+  <!-- メインコンテンツ -->
   <div class="main-content">
     <div class="content-header">
+      <!-- モバイル用メニューボタン -->
+      <button class="mobile-menu-btn" on:click={toggleMobileMenu}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
       <h2>詳細情報</h2>
       {#if selectedId}
         <div class="breadcrumb">
@@ -183,6 +247,75 @@ onMount(() => {
   background-color: #1a1a1a;
   color: #e0e0e0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  position: relative;
+  
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    flex-direction: row; /* 2カラムを維持 */
+  }
+}
+
+/* モバイル用オーバーレイ */
+.mobile-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 998;
+  display: none;
+  
+  @media (max-width: 768px) {
+    display: block;
+  }
+}
+
+/* モバイル用メニューボタン */
+.mobile-menu-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: #ffffff;
+  padding: 0.5rem;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+  
+  &:hover {
+    background-color: #404040;
+  }
+  
+  @media (max-width: 768px) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+/* モバイル用閉じるボタン */
+.mobile-close-btn {
+  display: none;
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: #ffffff;
+  padding: 0.5rem;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+  
+  &:hover {
+    background-color: #404040;
+  }
+  
+  @media (max-width: 768px) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 .sidebar {
@@ -193,16 +326,46 @@ onMount(() => {
   display: flex;
   flex-direction: column;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 320px;
+    min-width: 320px;
+    height: 100vh;
+    z-index: 999;
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    border-right: none;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.3);
+    
+    &.mobile-open {
+      transform: translateX(0);
+    }
+  }
+  
   .sidebar-header {
     padding: 1.5rem 1rem;
     border-bottom: 1px solid #404040;
     background-color: #333;
+    position: relative;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      padding: 1rem 3rem 1rem 1rem; /* 右側に閉じるボタンの余白 */
+    }
     
     h2 {
       margin: 0 0 0.5rem 0;
       font-size: 1.25rem;
       font-weight: 600;
       color: #ffffff;
+      
+      /* モバイル対応 */
+      @media (max-width: 768px) {
+        font-size: 1.125rem;
+      }
     }
     
     .status-indicator {
@@ -232,6 +395,11 @@ onMount(() => {
       border-radius: 4px;
       transition: all 0.2s ease;
       
+      /* モバイル対応：タップしやすいサイズ */
+      @media (max-width: 768px) {
+        min-height: 48px;
+      }
+      
       &:hover {
         background-color: #3a3a3a;
       }
@@ -246,6 +414,12 @@ onMount(() => {
       padding: 1.5rem;
       text-align: center;
       color: #a0a0a0;
+      
+      /* モバイル対応 */
+      @media (max-width: 768px) {
+        padding: 1rem;
+        font-size: 0.875rem;
+      }
     }
   }
 }
@@ -256,22 +430,52 @@ onMount(() => {
   flex-direction: column;
   overflow: hidden;
   
+  /* モバイル対応 */
+  @media (max-width: 768px) {
+    width: 100%;
+    height: 100vh;
+  }
+  
   .content-header {
     padding: 1.5rem 2rem;
     border-bottom: 1px solid #404040;
     background-color: #242424;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      padding: 1rem;
+      gap: 0.75rem;
+    }
     
     h2 {
       margin: 0 0 0.5rem 0;
       font-size: 1.25rem;
       font-weight: 600;
       color: #ffffff;
+      flex: 1;
+      
+      /* モバイル対応 */
+      @media (max-width: 768px) {
+        font-size: 1.125rem;
+        margin: 0;
+      }
     }
     
     .breadcrumb {
       font-size: 0.875rem;
       color: #a0a0a0;
       font-family: monospace;
+      
+      /* モバイル対応 */
+      @media (max-width: 768px) {
+        font-size: 0.75rem;
+        position: absolute;
+        top: 3.5rem;
+        left: 1rem;
+      }
     }
   }
   
@@ -280,8 +484,19 @@ onMount(() => {
     overflow-y: auto;
     padding: 2rem;
     
+    /* モバイル対応 */
+    @media (max-width: 768px) {
+      padding: 1rem;
+      padding-top: 2rem; /* breadcrumbの余白 */
+    }
+    
     .latest-info {
       margin-bottom: 2rem;
+      
+      /* モバイル対応 */
+      @media (max-width: 768px) {
+        margin-bottom: 1rem;
+      }
       
       h3 {
         margin: 0 0 1rem 0;
@@ -290,6 +505,12 @@ onMount(() => {
         color: #ffffff;
         border-bottom: 2px solid #4f46e5;
         padding-bottom: 0.5rem;
+        
+        /* モバイル対応 */
+        @media (max-width: 768px) {
+          font-size: 1rem;
+          margin-bottom: 0.75rem;
+        }
       }
       
       .latest-card {
@@ -298,6 +519,12 @@ onMount(() => {
         border-radius: 8px;
         padding: 1.5rem;
         box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        
+        /* モバイル対応 */
+        @media (max-width: 768px) {
+          padding: 1rem;
+          border-radius: 6px;
+        }
       }
     }
     
@@ -309,6 +536,12 @@ onMount(() => {
         color: #ffffff;
         border-bottom: 2px solid #10b981;
         padding-bottom: 0.5rem;
+        
+        /* モバイル対応 */
+        @media (max-width: 768px) {
+          font-size: 1rem;
+          margin-bottom: 1rem;
+        }
       }
       
       .timeline {
@@ -317,6 +550,11 @@ onMount(() => {
         .timeline-item {
           display: flex;
           margin-bottom: 1.5rem;
+          
+          /* モバイル対応 */
+          @media (max-width: 768px) {
+            margin-bottom: 1rem;
+          }
           
           &.latest .timeline-dot {
             background-color: #f59e0b;
@@ -327,6 +565,11 @@ onMount(() => {
             position: relative;
             margin-right: 1rem;
             
+            /* モバイル対応 */
+            @media (max-width: 768px) {
+              margin-right: 0.75rem;
+            }
+            
             .timeline-dot {
               width: 12px;
               height: 12px;
@@ -334,6 +577,13 @@ onMount(() => {
               border: 2px solid #374151;
               border-radius: 50%;
               margin-top: 0.5rem;
+              
+              /* モバイル対応 */
+              @media (max-width: 768px) {
+                width: 10px;
+                height: 10px;
+                margin-top: 0.25rem;
+              }
             }
             
             .timeline-line {
@@ -344,6 +594,12 @@ onMount(() => {
               width: 2px;
               height: calc(100% + 1.5rem);
               background-color: #374151;
+              
+              /* モバイル対応 */
+              @media (max-width: 768px) {
+                top: 15px;
+                height: calc(100% + 1rem);
+              }
             }
           }
           
@@ -354,11 +610,23 @@ onMount(() => {
             border-radius: 8px;
             padding: 1rem;
             
+            /* モバイル対応 */
+            @media (max-width: 768px) {
+              padding: 0.75rem;
+              border-radius: 6px;
+            }
+            
             .update-number {
               font-size: 0.875rem;
               color: #10b981;
               font-weight: 600;
               margin-bottom: 0.5rem;
+              
+              /* モバイル対応 */
+              @media (max-width: 768px) {
+                font-size: 0.75rem;
+                margin-bottom: 0.25rem;
+              }
             }
           }
         }
@@ -379,11 +647,21 @@ onMount(() => {
           margin: 0 0 1rem 0;
           font-size: 1.25rem;
           font-weight: 500;
+          
+          /* モバイル対応 */
+          @media (max-width: 768px) {
+            font-size: 1.125rem;
+          }
         }
         
         p {
           margin: 0;
           font-size: 0.875rem;
+          
+          /* モバイル対応 */
+          @media (max-width: 768px) {
+            font-size: 0.75rem;
+          }
         }
       }
     }
@@ -402,6 +680,11 @@ onMount(() => {
 /* スクロールバーのカスタマイズ */
 ::-webkit-scrollbar {
   width: 6px;
+  
+  /* モバイル対応：スクロールバーを細く */
+  @media (max-width: 768px) {
+    width: 4px;
+  }
 }
 
 ::-webkit-scrollbar-track {
