@@ -6,12 +6,12 @@ $: item = (() => {
   return {
     serial: parsed.serialNo,
     forecastString: (() => {
-      if(!parsed.body.intensity) return "不明"
+      if(!parsed.body.intensity || !parsed.body.intensity.forecastMaxInt) return "不明"
       if(parsed.body.intensity.forecastMaxInt.to === "over") return "不明"
       if(parsed.body.intensity.forecastMaxInt.to === "5-") return "5弱"
       if(parsed.body.intensity.forecastMaxInt.to === "5+") return "5強"
-      if(parsed.body.intensity.forecastMaxInt.to === "6-") return "不明"
-      if(parsed.body.intensity.forecastMaxInt.to === "6+") return "不明"
+      if(parsed.body.intensity.forecastMaxInt.to === "6-") return "6弱"
+      if(parsed.body.intensity.forecastMaxInt.to === "6+") return "6強"
       return parsed.body.intensity.forecastMaxInt.to
     })(),
     originTime: parsed.body.earthquake.originTime,

@@ -16,14 +16,15 @@ $: forecast = (() => {
 			return parsed.body.intensity.forecastMaxInt.to;
 		})(),
 		color: (() => {
+			if (!parsed.body.intensity || !parsed.body.intensity.forecastMaxInt) return "";
 			if (parsed.body.intensity.forecastMaxInt.to === "4") return "text-warning";
 			if (parsed.body.intensity.forecastMaxInt.to === "5-") return "text-warning";
 			if (parsed.body.intensity.forecastMaxInt.to === "5+") return "text-danger";
 			if (parsed.body.intensity.forecastMaxInt.to === "6-") return "text-danger";
 			if (parsed.body.intensity.forecastMaxInt.to === "6+") return "text-danger";
 			if (parsed.body.intensity.forecastMaxInt.to === "7") return "text-danger";
-      return ""
-    })(),
+			return "";
+		})(),
 	};
 })();
 </script>

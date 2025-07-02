@@ -21,6 +21,7 @@ let selectedId: string | null = null;
 $: eewEntries = Array.from(eews.entries()) as [string, Event[]][];
 $: selectedEvents =
 	selectedId && eews.has(selectedId) ? (eews.get(selectedId) ?? []) : [];
+$: latestEvent = selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null;
 
 $: latestEews = eewEntries
 	.map(([eventId, events]) => {
@@ -46,6 +47,14 @@ $: latestEews = eewEntries
 	})
 	.filter((item) => !!item)
 	.sort((a, b) => b.created - a.created);
+
+// 自動選択ロジック：リストがあり、何も選択されていない場合は最新のものを選択
+$: {
+	if (latestEews.length > 0 && !selectedId) {
+		selectedId = latestEews[0].id;
+	}
+}
+
 const filter = {
 	kinds: [7078],
 	"#d": ["eew_alert_system_by_shino3"],
@@ -81,54 +90,322 @@ onMount(() => {
 
   </UniqueEventList>
 </NostrApp> -->
-<div class="outline">
-  {#if eewEntries.length > 0}
-    <div class="eew-detail">
-      {#if selectedEvents.length > 0}
-        <div class="latest">
-          <EEWLatest content={selectedEvents.at(-1).content}></EEWLatest>
-        </div>
-        <div class="list">
-          {#each selectedEvents as ev}
-            <EEWDetail content={ev.content}></EEWDetail>
-          {/each}
-        </div>
-      {:else}
-        詳細は一覧から選択
-      {/if}
+<div class="admin-console">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h2>EEW 一覧</h2>
+      <div class="status-indicator">
+        <span class="status-dot"></span>
+        受信中
+      </div>
     </div>
     <div class="eew-list">
-    {#each latestEews as item}
-      <div on:click={() => (selectedId = item.id)}>
-        <EEWItem {item} selected={selectedId===item.id}></EEWItem>
-      </div>
-    {/each}
+      {#if eewEntries.length > 0}
+        {#each latestEews as item}
+          <div 
+            class="eew-item-wrapper" 
+            class:selected={selectedId === item.id}
+            on:click={() => (selectedId = item.id)}
+          >
+            <EEWItem {item} selected={selectedId === item.id}></EEWItem>
+          </div>
+        {/each}
+      {:else}
+        <div class="no-data">
+          <p>EEWイベントを受信していません</p>
+        </div>
+      {/if}
     </div>
-  {:else}
-  <p>まだ EEW イベントが届いていません…</p>
-  {/if}
+  </div>
+
+  <div class="main-content">
+    <div class="content-header">
+      <h2>詳細情報</h2>
+      {#if selectedId}
+        <div class="breadcrumb">
+          EEW ID: {selectedId}
+        </div>
+      {/if}
+    </div>
+    
+    <div class="detail-section">
+      {#if selectedId && selectedEvents.length > 0 && latestEvent}
+        <div class="latest-info">
+          <h3>最新情報</h3>
+          <div class="latest-card">
+            <EEWLatest content={latestEvent.content}></EEWLatest>
+          </div>
+        </div>
+        
+        <div class="timeline-section">
+          <h3>更新履歴（時系列）</h3>
+          <div class="timeline">
+            {#each selectedEvents.slice().reverse() as ev, index}
+              <div class="timeline-item" class:latest={index === 0}>
+                <div class="timeline-marker">
+                  <div class="timeline-dot"></div>
+                  {#if index < selectedEvents.length - 1}
+                    <div class="timeline-line"></div>
+                  {/if}
+                </div>
+                <div class="timeline-content">
+                  <div class="update-number">第{selectedEvents.length - index}報</div>
+                  <EEWDetail content={ev.content}></EEWDetail>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {:else if latestEews.length === 0}
+        <div class="no-selection">
+          <div class="placeholder">
+            <h3>EEWイベントを受信中...</h3>
+            <p>EEWが受信されると自動的に表示されます</p>
+          </div>
+        </div>
+      {/if}
+    </div>
+  </div>
 </div>
 
 <style lang="scss">
-.outline {
+.admin-console {
   display: flex;
-  width: 100vw;
+  height: 100vh;
+  background-color: #1a1a1a;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
-.eew-detail{
-  width: calc(100vw - 320px);
-  >.latest {
-    height: 35dvh;
-    overflow: hidden;
+
+.sidebar {
+  width: 380px;
+  min-width: 380px;
+  background-color: #2d2d2d;
+  border-right: 1px solid #404040;
+  display: flex;
+  flex-direction: column;
+  
+  .sidebar-header {
+    padding: 1.5rem 1rem;
+    border-bottom: 1px solid #404040;
+    background-color: #333;
+    
+    h2 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #ffffff;
+    }
+    
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      font-size: 0.875rem;
+      color: #a0a0a0;
+      
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        background-color: #4ade80;
+        border-radius: 50%;
+        margin-right: 0.5rem;
+        animation: pulse 2s infinite;
+      }
+    }
   }
-  >.list {
-    height: 65dvh;
-    overflow: auto;
+  
+  .eew-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.25rem;
+    
+    .eew-item-wrapper {
+      cursor: pointer;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+      
+      &:hover {
+        background-color: #3a3a3a;
+      }
+      
+      &.selected {
+        background-color: #4f46e5;
+        box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
+      }
+    }
+    
+    .no-data {
+      padding: 1.5rem;
+      text-align: center;
+      color: #a0a0a0;
+    }
   }
 }
-.eew-list {
-  width: 320px;
-  min-width: 320px;
-  height: 100dvh;
-  overflow: auto;
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  
+  .content-header {
+    padding: 1.5rem 2rem;
+    border-bottom: 1px solid #404040;
+    background-color: #242424;
+    
+    h2 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #ffffff;
+    }
+    
+    .breadcrumb {
+      font-size: 0.875rem;
+      color: #a0a0a0;
+      font-family: monospace;
+    }
+  }
+  
+  .detail-section {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2rem;
+    
+    .latest-info {
+      margin-bottom: 2rem;
+      
+      h3 {
+        margin: 0 0 1rem 0;
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: #ffffff;
+        border-bottom: 2px solid #4f46e5;
+        padding-bottom: 0.5rem;
+      }
+      
+      .latest-card {
+        background-color: #2d2d2d;
+        border: 1px solid #404040;
+        border-radius: 8px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      }
+    }
+    
+    .timeline-section {
+      h3 {
+        margin: 0 0 1.5rem 0;
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: #ffffff;
+        border-bottom: 2px solid #10b981;
+        padding-bottom: 0.5rem;
+      }
+      
+      .timeline {
+        position: relative;
+        
+        .timeline-item {
+          display: flex;
+          margin-bottom: 1.5rem;
+          
+          &.latest .timeline-dot {
+            background-color: #f59e0b;
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+          }
+          
+          .timeline-marker {
+            position: relative;
+            margin-right: 1rem;
+            
+            .timeline-dot {
+              width: 12px;
+              height: 12px;
+              background-color: #6b7280;
+              border: 2px solid #374151;
+              border-radius: 50%;
+              margin-top: 0.5rem;
+            }
+            
+            .timeline-line {
+              position: absolute;
+              left: 50%;
+              top: 20px;
+              transform: translateX(-50%);
+              width: 2px;
+              height: calc(100% + 1.5rem);
+              background-color: #374151;
+            }
+          }
+          
+          .timeline-content {
+            flex: 1;
+            background-color: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 1rem;
+            
+            .update-number {
+              font-size: 0.875rem;
+              color: #10b981;
+              font-weight: 600;
+              margin-bottom: 0.5rem;
+            }
+          }
+        }
+      }
+    }
+    
+    .no-selection {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      
+      .placeholder {
+        text-align: center;
+        color: #a0a0a0;
+        
+        h3 {
+          margin: 0 0 1rem 0;
+          font-size: 1.25rem;
+          font-weight: 500;
+        }
+        
+        p {
+          margin: 0;
+          font-size: 0.875rem;
+        }
+      }
+    }
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* スクロールバーのカスタマイズ */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #404040;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #525252;
 }
 </style>
