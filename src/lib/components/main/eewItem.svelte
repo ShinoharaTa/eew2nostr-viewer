@@ -13,7 +13,7 @@ export let selected: boolean
 <section class="eew-item {selected ? 'selected' : ''}">
   <div class="intensity-section">
     {#if item.forecast === "不明"}
-      <div class="magnitude-primary">
+      <div class="magnitude-primary" class:magnitude-warning={parseFloat(item.magnitude) >= 5.0 && parseFloat(item.magnitude) < 7.0} class:magnitude-danger={parseFloat(item.magnitude) >= 7.0}>
         <span class="magnitude-prefix">M</span>{item.magnitude}
       </div>
       <div class="forecast-secondary">
@@ -110,19 +110,6 @@ export let selected: boolean
     line-height: 1.2;
   }
   
-  .undefined {
-    font-size: 0.875rem;
-    color: #9ca3af;
-    background-color: #374151;
-    padding: 0.125rem 0.375rem;
-    border-radius: 3px;
-    
-    /* モバイル対応 */
-    @media (max-width: 768px) {
-      font-size: 1rem;
-    }
-  }
-  
   .intensity-4 {
     color: #fbbf24;
   }
@@ -181,6 +168,15 @@ export let selected: boolean
     @media (max-width: 768px) {
       font-size: 1rem;
     }
+  }
+  
+  /* マグニチュード基準の色分け */
+  &.magnitude-warning {
+    color: #fbbf24;
+  }
+  
+  &.magnitude-danger {
+    color: #dc2626;
   }
 }
 

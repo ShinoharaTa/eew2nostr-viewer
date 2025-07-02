@@ -6,6 +6,7 @@ import EEWDetail from "$lib/components/main/eewDetail.svelte";
 import EEWLatest from "$lib/components/main/latestEewDetail.svelte";
 import { SimplePool } from "nostr-tools/pool";
 import { onMount, onDestroy } from "svelte";
+import { browser } from '$app/environment';
 
 const pool = new SimplePool();
 const relays = [
@@ -76,7 +77,7 @@ function closeMobileMenu() {
 // EEW選択時にモバイルメニューを閉じる
 function selectEEW(id: string) {
 	selectedId = id;
-	if (window.innerWidth <= 768) {
+	if (browser && window.innerWidth <= 768) {
 		closeMobileMenu();
 	}
 }
@@ -96,15 +97,19 @@ onMount(() => {
 		},
 	});
 	
-	// イベントリスナーの追加
-	window.addEventListener('keydown', handleKeydown);
-	window.addEventListener('resize', handleResize);
+	// イベントリスナーの追加（ブラウザ環境でのみ）
+	if (browser) {
+		window.addEventListener('keydown', handleKeydown);
+		window.addEventListener('resize', handleResize);
+	}
 });
 
 onDestroy(() => {
-	// イベントリスナーのクリーンアップ
-	window.removeEventListener('keydown', handleKeydown);
-	window.removeEventListener('resize', handleResize);
+	// イベントリスナーのクリーンアップ（ブラウザ環境でのみ）
+	if (browser) {
+		window.removeEventListener('keydown', handleKeydown);
+		window.removeEventListener('resize', handleResize);
+	}
 });
 
 // キーボードイベントハンドラ
@@ -116,8 +121,16 @@ function handleKeydown(event: KeyboardEvent) {
 
 // ウィンドウリサイズ時の処理
 function handleResize() {
-	if (window.innerWidth > 768 && isMobileMenuOpen) {
+	if (browser && window.innerWidth > 768 && isMobileMenuOpen) {
 		closeMobileMenu();
+	}
+}
+
+// キーボードイベントハンドラー（EEWアイテム用）
+function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
+	if (event.key === 'Enter' || event.key === ' ') {
+		event.preventDefault();
+		selectEEW(itemId);
 	}
 }
 </script>
@@ -143,19 +156,24 @@ function handleResize() {
 <div class="admin-console">
   <!-- モバイル用オーバーレイ -->
   {#if isMobileMenuOpen}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="mobile-overlay" on:click={closeMobileMenu}></div>
   {/if}
 
   <!-- サイドバー -->
   <div class="sidebar" class:mobile-open={isMobileMenuOpen}>
     <div class="sidebar-header">
-      <h2>EEW 一覧</h2>
       <div class="status-indicator">
         <span class="status-dot"></span>
         受信中
       </div>
       <!-- モバイル用閉じるボタン -->
-      <button class="mobile-close-btn" on:click={closeMobileMenu}>
+      <button 
+        class="mobile-close-btn" 
+        on:click={closeMobileMenu}
+        aria-label="メニューを閉じる"
+      >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -168,7 +186,11 @@ function handleResize() {
           <div 
             class="eew-item-wrapper" 
             class:selected={selectedId === item.id}
+            role="button"
+            tabindex="0"
             on:click={() => selectEEW(item.id)}
+            on:keydown={(e) => handleEEWItemKeydown(e, item.id)}
+            aria-label="EEW {item.hypocenter} 震度{item.forecast} マグニチュード{item.magnitude}"
           >
             <EEWItem {item} selected={selectedId === item.id}></EEWItem>
           </div>
@@ -185,32 +207,33 @@ function handleResize() {
   <div class="main-content">
     <div class="content-header">
       <!-- モバイル用メニューボタン -->
-      <button class="mobile-menu-btn" on:click={toggleMobileMenu}>
+      <button 
+        class="mobile-menu-btn" 
+        on:click={toggleMobileMenu}
+        aria-label="メニューを開く"
+      >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="3" y1="6" x2="21" y2="6"></line>
           <line x1="3" y1="12" x2="21" y2="12"></line>
           <line x1="3" y1="18" x2="21" y2="18"></line>
         </svg>
       </button>
-      <h2>詳細情報</h2>
       {#if selectedId}
-        <div class="breadcrumb">
-          EEW ID: {selectedId}
-        </div>
+        <h1 class="eew-title">EEW {selectedId}</h1>
+      {:else}
+        <h1 class="eew-title">EEW ビューアー</h1>
       {/if}
     </div>
     
     <div class="detail-section">
       {#if selectedId && selectedEvents.length > 0 && latestEvent}
         <div class="latest-info">
-          <h3>最新情報</h3>
           <div class="latest-card">
             <EEWLatest content={latestEvent.content}></EEWLatest>
           </div>
         </div>
         
         <div class="timeline-section">
-          <h3>更新履歴（時系列）</h3>
           <div class="timeline">
             {#each selectedEvents.slice().reverse() as ev, index}
               <div class="timeline-item" class:latest={index === 0}>
@@ -356,18 +379,6 @@ function handleResize() {
       padding: 1rem 3rem 1rem 1rem; /* 右側に閉じるボタンの余白 */
     }
     
-    h2 {
-      margin: 0 0 0.5rem 0;
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: #ffffff;
-      
-      /* モバイル対応 */
-      @media (max-width: 768px) {
-        font-size: 1.125rem;
-      }
-    }
-    
     .status-indicator {
       display: flex;
       align-items: center;
@@ -450,31 +461,17 @@ function handleResize() {
       gap: 0.75rem;
     }
     
-    h2 {
-      margin: 0 0 0.5rem 0;
+    .eew-title {
+      margin: 0;
       font-size: 1.25rem;
       font-weight: 600;
       color: #ffffff;
+      font-family: monospace;
       flex: 1;
       
       /* モバイル対応 */
       @media (max-width: 768px) {
         font-size: 1.125rem;
-        margin: 0;
-      }
-    }
-    
-    .breadcrumb {
-      font-size: 0.875rem;
-      color: #a0a0a0;
-      font-family: monospace;
-      
-      /* モバイル対応 */
-      @media (max-width: 768px) {
-        font-size: 0.75rem;
-        position: absolute;
-        top: 3.5rem;
-        left: 1rem;
       }
     }
   }
@@ -487,7 +484,6 @@ function handleResize() {
     /* モバイル対応 */
     @media (max-width: 768px) {
       padding: 1rem;
-      padding-top: 2rem; /* breadcrumbの余白 */
     }
     
     .latest-info {
@@ -496,21 +492,6 @@ function handleResize() {
       /* モバイル対応 */
       @media (max-width: 768px) {
         margin-bottom: 1rem;
-      }
-      
-      h3 {
-        margin: 0 0 1rem 0;
-        font-size: 1.125rem;
-        font-weight: 600;
-        color: #ffffff;
-        border-bottom: 2px solid #4f46e5;
-        padding-bottom: 0.5rem;
-        
-        /* モバイル対応 */
-        @media (max-width: 768px) {
-          font-size: 1rem;
-          margin-bottom: 0.75rem;
-        }
       }
       
       .latest-card {
@@ -529,21 +510,6 @@ function handleResize() {
     }
     
     .timeline-section {
-      h3 {
-        margin: 0 0 1.5rem 0;
-        font-size: 1.125rem;
-        font-weight: 600;
-        color: #ffffff;
-        border-bottom: 2px solid #10b981;
-        padding-bottom: 0.5rem;
-        
-        /* モバイル対応 */
-        @media (max-width: 768px) {
-          font-size: 1rem;
-          margin-bottom: 1rem;
-        }
-      }
-      
       .timeline {
         position: relative;
         
