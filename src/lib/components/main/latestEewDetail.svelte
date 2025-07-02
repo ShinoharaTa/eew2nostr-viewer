@@ -1,9 +1,9 @@
 <script lang="ts">
 import { format, parseISO } from "date-fns";
 export let content: string;
-const parsed = (() => {
-	return JSON.parse(content);
-})();
+
+$: parsed = JSON.parse(content);
+
 $: forecast = (() => {
 	return {
 		string: (() => {

@@ -19,8 +19,16 @@ const yesterday = getUnixTime(subDays(new Date(), 7));
 let eews: Map<string, Event[]> = new Map();
 let selectedId: string | null = null;
 $: eewEntries = Array.from(eews.entries()) as [string, Event[]][];
-$: selectedEvents =
-	selectedId && eews.has(selectedId) ? (eews.get(selectedId) ?? []) : [];
+
+// selectedIdとeewsマップの両方に依存するリアクティブ計算
+$: selectedEvents = (() => {
+	if (!selectedId || !eews.has(selectedId)) {
+		return [];
+	}
+	const events = eews.get(selectedId) ?? [];
+	return events.sort((a, b) => a.created_at - b.created_at);
+})();
+
 $: latestEvent = selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null;
 
 $: latestEews = eewEntries
