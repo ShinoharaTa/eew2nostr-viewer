@@ -1,5 +1,5 @@
 <script lang="ts">
-import { format, getUnixTime, subDays } from "date-fns";
+import { getUnixTime, subDays } from "date-fns";
 import type { Event } from "nostr-tools/core";
 import EEWItem from "$lib/components/main/eewItem.svelte";
 import EEWDetail from "$lib/components/main/eewDetail.svelte";
@@ -15,8 +15,10 @@ const relays = [
 	"wss://yabu.me",
 ];
 
-const now = getUnixTime(new Date());
 const yesterday = getUnixTime(subDays(new Date(), 7));
+// このコンポーネントは runes ではなく `$:` によるレガシーリアクティビティで動いており、
+// 更新は下の `eews = new Map(eews)` による再代入で伝播させている。
+// eslint-disable-next-line svelte/prefer-svelte-reactivity
 let eews: Map<string, Event[]> = new Map();
 let selectedId: string | null = null;
 let isMobileMenuOpen = false; // モバイルメニューの開閉状態
@@ -182,7 +184,7 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
     </div>
     <div class="eew-list">
       {#if eewEntries.length > 0}
-        {#each latestEews as item}
+        {#each latestEews as item (item.id)}
           <div 
             class="eew-item-wrapper" 
             class:selected={selectedId === item.id}
@@ -235,7 +237,7 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
         
         <div class="timeline-section">
           <div class="timeline">
-            {#each selectedEvents.slice().reverse() as ev, index}
+            {#each selectedEvents.slice().reverse() as ev, index (ev.id)}
               <div class="timeline-item" class:latest={index === 0}>
                 <div class="timeline-marker">
                   <div class="timeline-dot"></div>
