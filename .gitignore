@@ -149,3 +149,6 @@ dist
 package
 
 # End of https://www.toptal.com/developers/gitignore/api/svelte,node
+
+# SvelteKit adapter-node output
+/build
