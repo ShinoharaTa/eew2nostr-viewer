@@ -6,6 +6,7 @@ import EEWDetail from "$lib/components/main/eewDetail.svelte";
 import EEWLatest from "$lib/components/main/latestEewDetail.svelte";
 import { SimplePool } from "nostr-tools/pool";
 import { onMount, onDestroy } from "svelte";
+import { SvelteMap } from "svelte/reactivity";
 import { browser } from '$app/environment';
 
 const pool = new SimplePool();
@@ -16,26 +17,26 @@ const relays = [
 ];
 
 const yesterday = getUnixTime(subDays(new Date(), 7));
-// このコンポーネントは runes ではなく `$:` によるレガシーリアクティビティで動いており、
-// 更新は下の `eews = new Map(eews)` による再代入で伝播させている。
-// eslint-disable-next-line svelte/prefer-svelte-reactivity
-let eews: Map<string, Event[]> = new Map();
-let selectedId: string | null = null;
-let isMobileMenuOpen = false; // モバイルメニューの開閉状態
-$: eewEntries = Array.from(eews.entries()) as [string, Event[]][];
+const eews = new SvelteMap<string, Event[]>();
+let selectedId = $state<string | null>(null);
+let isMobileMenuOpen = $state(false); // モバイルメニューの開閉状態
+const eewEntries = $derived(Array.from(eews.entries()));
 
 // selectedIdとeewsマップの両方に依存するリアクティブ計算
-$: selectedEvents = (() => {
-	if (!selectedId || !eews.has(selectedId)) {
+const selectedEvents = $derived.by(() => {
+	if (!selectedId) {
 		return [];
 	}
 	const events = eews.get(selectedId) ?? [];
-	return events.sort((a, b) => a.created_at - b.created_at);
-})();
+	// sort は破壊的なので、Map に入っている配列をそのまま並べ替えない
+	return [...events].sort((a, b) => a.created_at - b.created_at);
+});
 
-$: latestEvent = selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null;
+const latestEvent = $derived(
+	selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null,
+);
 
-$: latestEews = eewEntries
+const latestEews = $derived(eewEntries
 	.map(([eventId, events]) => {
 		const latest = [...events]
 			.sort((a, b) => a.created_at - b.created_at)
@@ -58,14 +59,15 @@ $: latestEews = eewEntries
 		};
 	})
 	.filter((item) => !!item)
-	.sort((a, b) => b.created - a.created);
+	.sort((a, b) => b.created - a.created));
 
-// 自動選択ロジック：リストがあり、何も選択されていない場合は最新のものを選択
-$: {
+// 自動選択ロジック：リストがあり、何も選択されていない場合は最新のものを選択。
+// 派生値ではなく selectedId への代入なので $derived ではなく $effect を使う。
+$effect(() => {
 	if (latestEews.length > 0 && !selectedId) {
 		selectedId = latestEews[0].id;
 	}
-}
+});
 
 // メニュー開閉関数
 function toggleMobileMenu() {
@@ -94,8 +96,8 @@ onMount(() => {
 		onevent(ev) {
 			const { eventId } = JSON.parse(ev.content);
 			const arr = eews.get(eventId) ?? [];
+			// SvelteMap なので set がそのまま更新として伝播する
 			eews.set(eventId, [...arr, ev]);
-			eews = new Map(eews);
 		},
 	});
 	
@@ -158,9 +160,9 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
 <div class="admin-console">
   <!-- モバイル用オーバーレイ -->
   {#if isMobileMenuOpen}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="mobile-overlay" on:click={closeMobileMenu}></div>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="mobile-overlay" onclick={closeMobileMenu}></div>
   {/if}
 
   <!-- サイドバー -->
@@ -173,7 +175,7 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
       <!-- モバイル用閉じるボタン -->
       <button 
         class="mobile-close-btn" 
-        on:click={closeMobileMenu}
+        onclick={closeMobileMenu}
         aria-label="メニューを閉じる"
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -190,8 +192,8 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
             class:selected={selectedId === item.id}
             role="button"
             tabindex="0"
-            on:click={() => selectEEW(item.id)}
-            on:keydown={(e) => handleEEWItemKeydown(e, item.id)}
+            onclick={() => selectEEW(item.id)}
+            onkeydown={(e) => handleEEWItemKeydown(e, item.id)}
             aria-label="EEW {item.hypocenter} 震度{item.forecast} マグニチュード{item.magnitude}"
           >
             <EEWItem {item} selected={selectedId === item.id}></EEWItem>
@@ -211,7 +213,7 @@ function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
       <!-- モバイル用メニューボタン -->
       <button 
         class="mobile-menu-btn" 
-        on:click={toggleMobileMenu}
+        onclick={toggleMobileMenu}
         aria-label="メニューを開く"
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

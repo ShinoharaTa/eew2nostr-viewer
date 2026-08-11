@@ -1,7 +1,7 @@
 <script lang="ts">
 import { format, parseISO } from "date-fns";
-export let content: string
-$: item = (() => {
+let { content }: { content: string } = $props();
+const item = $derived.by(() => {
   const parsed = JSON.parse(content)
   return {
     serial: parsed.serialNo,
@@ -24,7 +24,7 @@ $: item = (() => {
     },
     depth: parsed.body.earthquake.hypocenter.depth.value
   }
-})();
+});
 </script>
 
 <div class="container outline">
