@@ -5,7 +5,7 @@ import ts from "typescript-eslint";
 import svelteConfig from "./svelte.config.js";
 
 export default ts.config(
-  { ignores: ["build/", ".svelte-kit/", "static/"] },
+  { ignores: ["build/", ".svelte-kit/", ".vercel/", "static/"] },
   js.configs.recommended,
   ts.configs.recommended,
   svelte.configs.recommended,
