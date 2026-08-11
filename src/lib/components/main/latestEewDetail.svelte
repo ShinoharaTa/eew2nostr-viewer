@@ -1,10 +1,10 @@
 <script lang="ts">
 import { format, parseISO } from "date-fns";
-export let content: string;
+let { content }: { content: string } = $props();
 
-$: parsed = JSON.parse(content);
+const parsed = $derived(JSON.parse(content));
 
-$: forecast = (() => {
+const forecast = $derived.by(() => {
 	return {
 		string: (() => {
 			if (!parsed.body.intensity) return "不明";
@@ -26,7 +26,7 @@ $: forecast = (() => {
 			return "";
 		})(),
 	};
-})();
+});
 </script>
 
 <div class="container outline text-center">

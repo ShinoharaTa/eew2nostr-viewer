@@ -1,13 +1,18 @@
 <script lang="ts">
 import { format } from "date-fns";
-export let item: {
-	forecast: string;
-	hypocenter: string;
-	depth: string;
-	magnitude: string;
-	originTime: Date;
-};
-export let selected: boolean
+let {
+	item,
+	selected,
+}: {
+	item: {
+		forecast: string;
+		hypocenter: string;
+		depth: string;
+		magnitude: string;
+		originTime: Date;
+	};
+	selected: boolean;
+} = $props();
 </script>
 
 <section class="eew-item {selected ? 'selected' : ''}">
