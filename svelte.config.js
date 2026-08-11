@@ -1,22 +1,20 @@
-// import preprocess from "svelte-preprocess";
-import adapter from "@sveltejs/adapter-auto";
-// import { vitePreprocess } from "@sveltejs/kit/vite";
+import adapterNode from "@sveltejs/adapter-node";
+import adapterVercel from "@sveltejs/adapter-vercel";
+
+// 本番は Vercel、ローカルと自己ホストは Node サーバーとして動かす。
+// Vercel は .vercel/output を、adapter-node は build/ を出力するため
+// 環境変数 VERCEL の有無で切り替える。
+// runtime を明示しないと adapter-vercel がビルド実行時の Node から
+// 推測するため、Vercel 非対応バージョン(25 系など)でビルドすると落ちる。
+const adapter = process.env.VERCEL
+  ? adapterVercel({ runtime: "nodejs24.x" })
+  : adapterNode();
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
-  // Consult https://kit.svelte.dev/docs/integrations#preprocessors
-  // for more information about preprocessors
-  preprocess: [
-    // vitePreprocess(),
-    // preprocess({
-    //   postcss: false
-    // }),
-  ],
+  preprocess: [],
   kit: {
-    // adapter-auto only supports some environments, see https://kit.svelte.dev/docs/adapter-auto for a list.
-    // If your environment is not supported or you settled on a specific environment, switch out the adapter.
-    // See https://kit.svelte.dev/docs/adapters for more information about adapters.
-    adapter: adapter(),
+    adapter,
   },
 };
 
