@@ -1,5 +1,7 @@
-<script>
-  import "../styles/style.scss";
+<script lang="ts">
+import "../styles/tokens.scss";
+
+let { children } = $props();
 </script>
 
-<slot />
+{@render children()}

@@ -73,7 +73,7 @@ function startResize(e: PointerEvent) {
 </script>
 
 <section
-  class="win"
+  class="win cut"
   class:focused
   class:collapsed
   style="left: {geom.x}px; top: {geom.y}px; width: {geom.w}px; height: {collapsed
@@ -81,6 +81,7 @@ function startResize(e: PointerEvent) {
     : geom.h + 'px'}; z-index: {z};"
   onpointerdowncapture={() => onfocus?.()}
 >
+  <div class="inner cut">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header class="head" onpointerdown={startDrag}>
     <span class="t">{title}</span>
@@ -101,19 +102,27 @@ function startResize(e: PointerEvent) {
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="grip" onpointerdown={startResize}></div>
   {/if}
+  </div>
 </section>
 
 <style lang="scss">
+/* clip-path は border を切ってしまうので、枠は「背景色＋1px の余白」で作る */
 .win {
   position: absolute;
   display: flex;
-  flex-direction: column;
-  background: rgba(18, 25, 29, 0.95);
-  border: 1px solid #35454d;
-  border-radius: 4px;
+  background: var(--line-hi);
+  padding: 1px;
   overflow: hidden;
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
-  &.focused { border-color: #67a9c4; }
+  &.focused { background: var(--accent); }
+}
+.inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-panel);
 }
 
 .head {
@@ -140,15 +149,15 @@ function startResize(e: PointerEvent) {
 
 .ctl {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--t-small);
   line-height: 1;
-  color: #6d7c83;
+  color: var(--ink-faint);
   background: transparent;
   border: none;
   padding: 2px 5px;
   cursor: pointer;
-  &:hover { color: #e2e9ec; }
-  &:focus-visible { outline: 2px solid #67a9c4; outline-offset: 1px; }
+  &:hover { color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 }
 
 .body { flex: 1; overflow: auto; min-height: 0; }
