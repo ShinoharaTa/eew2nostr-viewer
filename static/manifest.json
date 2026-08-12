@@ -1,6 +1,6 @@
 {
-  "name": "EEW Viewer on nostr",
-  "short_name": "EEW Viewer on nostr",
+  "name": "防災ダッシュボード",
+  "short_name": "防災ダッシュボード",
   "theme_color": "#000000",
   "background_color": "#000000",
   "display": "standalone",

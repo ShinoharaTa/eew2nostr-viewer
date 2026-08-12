@@ -158,6 +158,54 @@ export async function fetchWarningsForPrefecture(
   return { reports, failed };
 }
 
+/**
+ * 全国の警報を取る。府県予報区は58あるので、そのぶんの取得が走る。
+ * 気象庁へ一度に投げると負荷をかけるため、同時実行を絞る。
+ * 一部が失敗しても取れたぶんは返す。
+ */
+export async function fetchAllWarnings(
+  areas: AreaDict,
+  opts: { fetcher?: typeof fetch; concurrency?: number; onProgress?: (done: number, total: number) => void } = {},
+): Promise<{ reports: WarningReport[]; failed: string[] }> {
+  const { fetcher = fetch, concurrency = 6, onProgress } = opts;
+  const codes = Object.keys(areas.offices);
+  const reports: WarningReport[] = [];
+  const failed: string[] = [];
+  let done = 0;
+  let next = 0;
+
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= codes.length) return;
+      try {
+        reports.push(await fetchWarnings(codes[i], fetcher));
+      } catch {
+        failed.push(codes[i]);
+      }
+      onProgress?.(++done, codes.length);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, codes.length) }, () => worker()),
+  );
+  return { reports, failed };
+}
+
+/** 予報区コード -> 発令中で最も高い段階。地図の塗り分けに使う */
+export function topLevelByArea(reports: WarningReport[]): Map<string, WarningLevel> {
+  const out = new Map<string, WarningLevel>();
+  for (const rep of reports) {
+    for (const [code, w] of rep.byArea) {
+      if (!w.top) continue;
+      const cur = out.get(code);
+      if (!cur || LEVEL_RANK[w.top] > LEVEL_RANK[cur]) out.set(code, w.top);
+    }
+  }
+  return out;
+}
+
 async function json<T>(url: string, fetcher: typeof fetch): Promise<T> {
   const res = await fetcher(url);
   if (!res.ok) {

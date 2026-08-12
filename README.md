@@ -1,6 +1,22 @@
-# EEW on Nostr Kind: 30078 viewer
+# 防災ダッシュボード
 
-Nostr リレー上に流れる緊急地震速報(kind 7078 / `#d` = `eew_alert_system_by_shino3`)を表示するビューアです。
+気象庁の防災情報を地図上で横断して見るダッシュボードです。
+全国の白地図から県を選ぶと、その県に発表されている警報・注意報が並びます。
+
+## データ源
+
+いずれも気象庁が公開しているもので、CORS が開いているためブラウザから直接取得しています。
+
+| データ | 入手先 |
+| --- | --- |
+| 地域階層の定義 | `jma.go.jp/bosai/common/const/area.json` |
+| 予報区ポリゴン | `jma.go.jp/bosai/common/const/geojson/class10s.json` |
+| 警報・注意報 | `jma.go.jp/bosai/warning/data/warning/{府県コード}.json` |
+
+地図は Leaflet で描いています。背景タイルは使わず、予報区のポリゴンそのものを白地図としています。
+
+> 緊急地震速報の表示は現在ありません。nostr 経由の別系統のため、
+> ダッシュボードへの統合は別途対応します。
 
 ## セットアップ
 
