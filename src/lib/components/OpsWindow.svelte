@@ -1,5 +1,6 @@
 <script lang="ts">
 // 地図の上に重ねる可動ウインドウ。移動・リサイズ・前面化・折りたたみ・閉じる。
+import { onMount } from "svelte";
 import type { Snippet } from "svelte";
 
 /** 位置と大きさ。親が $state で持ち、ウインドウ側が直接書き換える。
@@ -25,9 +26,22 @@ interface Props {
 let { title, sub = "", geom, z, focused = false, onfocus, onclose, children }: Props = $props();
 
 let collapsed = $state(false);
+let el: HTMLElement;
 
 const MIN_W = 200;
 const MIN_H = 90;
+
+// 既定位置は広い画面を前提にしているので、狭い画面では画面外に出てしまう。
+// 初期表示のときだけ、親の中に収まるよう寄せる
+onMount(() => {
+  const parent = el.parentElement;
+  if (!parent) return;
+  const { clientWidth: pw, clientHeight: ph } = parent;
+  geom.w = Math.min(geom.w, Math.max(MIN_W, pw - 16));
+  geom.h = Math.min(geom.h, Math.max(MIN_H, ph - 16));
+  geom.x = Math.max(8, Math.min(geom.x, pw - geom.w - 8));
+  geom.y = Math.max(8, Math.min(geom.y, ph - geom.h - 8));
+});
 
 function startDrag(e: PointerEvent) {
   if ((e.target as HTMLElement).closest("button")) return;
@@ -73,6 +87,7 @@ function startResize(e: PointerEvent) {
 </script>
 
 <section
+  bind:this={el}
   class="win"
   class:focused
   class:collapsed

@@ -23,6 +23,12 @@ import {
   type WarningReport,
 } from "$lib/jma/api";
 import { prefectureName } from "$lib/jma/prefectures";
+import { subscribeEew, type EewSubscription } from "$lib/eew/client";
+import {
+  latestPerEvent,
+  shouldTakeOver,
+  type EewReport,
+} from "$lib/eew/eew";
 import {
   HAZARD_TILES,
   HAZARD_ATTRIBUTION,
@@ -39,7 +45,7 @@ import {
 } from "$lib/jma/warningCodes";
 
 type Phase = "loading" | "ready" | "error";
-type WinId = "list" | "detail" | "timeline";
+type WinId = "list" | "detail" | "timeline" | "eew";
 
 let phase = $state<Phase>("loading");
 let errorText = $state("");
@@ -63,7 +69,7 @@ const HOME_BOUNDS: [[number, number], [number, number]] = [
 // 気象警報とハザードマップが実装済み。他は取得経路の用意ができ次第つなぐ
 const LAYERS = [
   { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true, hazard: false },
-  { id: "quake", label: "地震", color: "#67a9c4", ready: false, hazard: false },
+  { id: "quake", label: "地震", color: "#67a9c4", ready: true, hazard: false },
   { id: "volcano", label: "火山", color: "#d0913f", ready: false, hazard: false },
   { id: "typhoon", label: "台風", color: "#dde5e8", ready: false, hazard: false },
   ...HAZARD_TILES.map((h) => ({
@@ -74,7 +80,7 @@ const LAYERS = [
     hazard: true,
   })),
 ];
-let layerOn = $state<Record<string, boolean>>({ warning: true });
+let layerOn = $state<Record<string, boolean>>({ warning: true, quake: true });
 let mapZoom = $state(5);
 
 const hazardOn = $derived(HAZARD_TILES.some((h) => layerOn[h.id]));
@@ -91,9 +97,10 @@ const geom = $state({
   list: { x: 16, y: 16, w: 330, h: 380 },
   detail: { x: 362, y: 16, w: 330, h: 300 },
   timeline: { x: 16, y: 412, w: 470, h: 220 },
+  eew: { x: 700, y: 16, w: 320, h: 300 },
 });
-let openWins = $state<WinId[]>(["list", "detail"]);
-let zOrder = $state<WinId[]>(["list", "detail", "timeline"]);
+let openWins = $state<WinId[]>(["list", "detail", "eew"]);
+let zOrder = $state<WinId[]>(["list", "detail", "timeline", "eew"]);
 
 const zOf = (id: WinId) => 10 + zOrder.indexOf(id);
 function focusWin(id: WinId) {
@@ -104,6 +111,21 @@ function toggleWin(id: WinId) {
   openWins = willOpen ? [...openWins, id] : openWins.filter((w) => w !== id);
   if (willOpen) focusWin(id);
 }
+
+// ---- 緊急地震速報 ----
+let eewReports = $state<EewReport[]>([]);
+let eewSub: EewSubscription | null = null;
+let dismissedEventId = $state<string | null>(null);
+// 時間経過で占有を降ろすため、一定間隔で now を進める
+let now = $state(Date.now());
+
+const quakes = $derived(latestPerEvent(eewReports));
+
+// 画面を占有するのは警報か震度5弱以上の予報だけ。
+// 予報はよく流れるので全部で覆うと、本当に危ないときに無視されるようになる
+const takeover = $derived(
+  quakes.find((q) => q.eventId !== dismissedEventId && shouldTakeOver(q, now)) ?? null,
+);
 
 const areaLevels = $derived(topLevelByArea(reports));
 
@@ -197,6 +219,32 @@ function styleOf(props: AreaFeatureProps): PathOptions {
   };
 }
 
+// 震源のマーカー。地震レイヤーの実体
+let quakeLayer: LLayerGroup | null = null;
+let leaflet: typeof import("leaflet") | null = null;
+
+function redrawQuakes() {
+  if (!map || !leaflet || !quakeLayer) return;
+  quakeLayer.clearLayers();
+  if (!layerOn.quake) return;
+  for (const q of quakes.slice(0, 20)) {
+    if (!q.coordinate) continue;
+    const strong = q.maxIntRank >= 5;
+    const marker = leaflet.circleMarker([q.coordinate.lat, q.coordinate.lon], {
+      radius: 4 + Math.max(0, q.maxIntRank) * 1.1,
+      color: strong ? "#ff2800" : "#67a9c4",
+      weight: 1.4,
+      fillColor: strong ? "#ff2800" : "#67a9c4",
+      fillOpacity: 0.25,
+    });
+    marker.bindTooltip(
+      `${q.hypocenter}／震度${q.maxIntLabel}／M${q.magnitude ?? "-"}`,
+      { direction: "top" },
+    );
+    quakeLayer.addLayer(marker);
+  }
+}
+
 function restyle() {
   areaLayer?.eachLayer((l: Layer) => {
     const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> }).feature;
@@ -265,6 +313,7 @@ function toggleLayer(id: string) {
     if (on) group.addTo(map);
     else map.removeLayer(group);
   }
+  if (id === "quake") redrawQuakes();
   restyle();
 }
 
@@ -274,6 +323,7 @@ onMount(async () => {
     // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
     const [mod, a, g] = await Promise.all([import("leaflet"), fetchAreas(), fetchClass10Geo()]);
     const L = mod.default ?? mod;
+    leaflet = L;
     areas = a;
 
     for (const f of (g as AreaGeoJson).features) {
@@ -311,6 +361,7 @@ onMount(async () => {
       if (hazardOn) restyle();
     });
 
+    quakeLayer = L.layerGroup().addTo(m);
     buildHazardLayers(L);
     // URL で指定されたハザードレイヤーを反映する
     for (const h of HAZARD_TILES) {
@@ -329,6 +380,14 @@ onMount(async () => {
     map = m;
     phase = "ready";
 
+    // 緊急地震速報を購読する。警報は秒を争うので押し出してもらう
+    eewSub = await subscribeEew((r) => {
+      eewReports = [...eewReports, r];
+      redrawQuakes();
+    });
+    // 発生からの経過で占有を降ろすため、時計を進める
+    nowTimer = setInterval(() => (now = Date.now()), 5000);
+
     // 全国58予報区ぶん。地図の塗り分けに要るが時間がかかるので、
     // 地図を出してから追いかけて取る
     const res = await fetchAllWarnings(a, {
@@ -343,7 +402,12 @@ onMount(async () => {
   }
 });
 
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+
 onDestroy(() => {
+  eewSub?.close();
+  eewSub = null;
+  if (nowTimer) clearInterval(nowTimer);
   map?.remove();
   map = null;
   areaLayer = null;
@@ -365,6 +429,7 @@ const DOCK: [WinId, string][] = [
   ["list", "一覧"],
   ["detail", "詳細"],
   ["timeline", "発表時刻"],
+  ["eew", "緊急地震速報"],
 ];
 </script>
 
@@ -523,6 +588,34 @@ const DOCK: [WinId, string][] = [
       </OpsWindow>
     {/if}
 
+    {#if phase === "ready" && openWins.includes("eew")}
+      <OpsWindow
+        title="緊急地震速報"
+        sub="{quakes.length}件 / 24時間"
+        geom={geom.eew}
+        z={zOf("eew")}
+        focused={zOrder.at(-1) === "eew"}
+        onfocus={() => focusWin("eew")}
+        onclose={() => toggleWin("eew")}
+      >
+        {#if quakes.length === 0}
+          <p class="empty">受信待ち</p>
+        {/if}
+        {#each quakes as q (q.eventId)}
+          <button class="row" onclick={() => q.coordinate && map?.setView([q.coordinate.lat, q.coordinate.lon], 8)}>
+            <i class={q.maxIntRank >= 5 ? "bar-warning" : "bar-other"}></i>
+            <span class="mid">
+              <span class="ttl">{q.hypocenter}</span>
+              <span class="sub">
+                震度{q.maxIntLabel} ／ M{q.magnitude ?? "-"} ／ {q.depthKm ?? "-"}km ／ 第{q.serial}報
+              </span>
+            </span>
+            <span class="tm mono">{fmtClock(Date.parse(q.originTime))}</span>
+          </button>
+        {/each}
+      </OpsWindow>
+    {/if}
+
     <div class="dock">
       {#each DOCK as [id, label] (id)}
         <button class="dockbtn" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
@@ -542,6 +635,42 @@ const DOCK: [WinId, string][] = [
         </span>
       {/each}
     </div>
+    {#if takeover}
+      <!-- 警報と震度5弱以上の予報だけ画面を占有する。
+           ウインドウを何枚開いていても全部覆う -->
+      <div class="takeover" role="alert">
+        <div class="tk-head">
+          <span class="tk-badge">
+            {takeover.isWarning ? "緊急地震速報（警報）" : "緊急地震速報（予報）"}
+          </span>
+          <span class="tk-serial mono">第{takeover.serial}報{takeover.isLastInfo ? "（最終）" : ""}</span>
+          <span class="grow"></span>
+          <button class="tk-close" onclick={() => (dismissedEventId = takeover.eventId)}>閉じる</button>
+        </div>
+        <div class="tk-body">
+          <div class="tk-place">
+            <span class="tk-label">震源</span>
+            <strong>{takeover.hypocenter}</strong>
+            <span class="tk-sub mono">
+              {#if takeover.coordinate}{takeover.coordinate.lat}N {takeover.coordinate.lon}E ／ {/if}
+              {fmtStamp(takeover.originTime)} 発生
+            </span>
+          </div>
+          <div class="tk-metric">
+            <span class="tk-label">最大震度</span>
+            <span class="tk-value strong">{takeover.maxIntLabel}</span>
+          </div>
+          <div class="tk-metric">
+            <span class="tk-label">規模</span>
+            <span class="tk-value">M{takeover.magnitude ?? "-"}</span>
+          </div>
+          <div class="tk-metric">
+            <span class="tk-label">深さ</span>
+            <span class="tk-value">{takeover.depthKm ?? "-"}<small>km</small></span>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -762,6 +891,69 @@ const DOCK: [WinId, string][] = [
 }
 
 .empty { padding: 20px 14px; margin: 0; color: #5d6c73; font-size: 13px; text-align: center; }
+
+/* 緊急時の占有表示 */
+.takeover {
+  position: absolute;
+  inset: 0;
+  z-index: 950;
+  background: rgba(10, 3, 6, 0.95);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 28px;
+}
+.tk-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 3px solid #a50021;
+  padding-bottom: 12px;
+}
+.tk-badge {
+  background: #a50021;
+  color: #fff;
+  font-weight: 700;
+  font-size: 17px;
+  padding: 5px 13px;
+  border-radius: 2px;
+}
+.tk-serial { color: #ff93a5; font-size: 15px; }
+.tk-close {
+  font: inherit;
+  font-size: 13px;
+  color: #ffb9c4;
+  background: transparent;
+  border: 1px solid #5f1a29;
+  border-radius: 3px;
+  padding: 8px 14px;
+  cursor: pointer;
+  min-height: 36px;
+  &:hover { background: #2a0a12; }
+}
+.tk-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 40px;
+  flex-wrap: wrap;
+  min-height: 0;
+}
+.tk-place { display: flex; flex-direction: column; gap: 6px; }
+.tk-place strong { font-size: clamp(30px, 4.5vw, 52px); letter-spacing: -0.02em; line-height: 1.1; }
+.tk-label { font-size: 11px; letter-spacing: 0.12em; color: #b58e97; }
+.tk-sub { font-size: 12px; color: #b58e97; }
+.tk-metric { display: flex; flex-direction: column; gap: 2px; }
+.tk-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: clamp(38px, 6vw, 76px);
+  line-height: 1;
+  font-weight: 700;
+  small { font-size: 0.4em; margin-left: 2px; }
+}
+.tk-value.strong { color: #ff5b6e; }
 .note {
   margin: 0;
   padding: 8px 10px;
