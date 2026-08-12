@@ -12,16 +12,24 @@ import type { Feature, MultiPolygon } from "geojson";
 import "leaflet/dist/leaflet.css";
 import OpsWindow from "$lib/components/OpsWindow.svelte";
 import {
-  fetchAreas,
   fetchClass10Geo,
-  fetchAllWarnings,
-  topLevelByArea,
   prefectureCodeOf,
-  type AreaDict,
   type AreaGeoJson,
   type AreaFeatureProps,
-  type WarningReport,
 } from "$lib/jma/api";
+import { subscribeBosaiStatus, type BosaiSubscription } from "$lib/bosai/client";
+import {
+  isActive,
+  prefectureCodeOfArea,
+  topSeverityByArea,
+  HAZARD_LABEL,
+  SEVERITY_COLOR,
+  SEVERITY_LABEL,
+  SEVERITY_RANK,
+  BOSAI_RELAY,
+  type BosaiStatus,
+  type Severity,
+} from "$lib/bosai/status";
 import { prefectureName } from "$lib/jma/prefectures";
 import {
   HAZARD_TILES,
@@ -29,25 +37,23 @@ import {
   PATH_MAX_NATIVE_ZOOM,
   hazardTileUrl,
 } from "$lib/hazard/tiles";
-import {
-  LEVEL_COLOR,
-  LEVEL_LABEL,
-  LEVEL_RANK,
-  warningLevel,
-  warningName,
-  type WarningLevel,
-} from "$lib/jma/warningCodes";
 
 type Phase = "loading" | "ready" | "error";
 type WinId = "list" | "detail" | "timeline";
 
 let phase = $state<Phase>("loading");
 let errorText = $state("");
-let progress = $state({ done: 0, total: 0 });
 
-let areas = $state<AreaDict | null>(null);
-let reports = $state<WarningReport[]>([]);
-let failedOffices = $state<string[]>([]);
+// key ごとに最新1件。addressable event なので同じ key の更新で置き換わる
+let statusByKey = $state<Record<string, BosaiStatus>>({});
+let bosaiSub: BosaiSubscription | null = null;
+let received = $state(0);
+// 受信できないまま黙って空になるのが一番困る。一定時間で状態を出す
+let stalled = $state(false);
+let stallTimer: ReturnType<typeof setTimeout> | null = null;
+// 経過表示のために時計を進める
+let now = $state(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
 let selectedPref = $state<string | null>(null);
 let selectedArea = $state<string | null>(null);
 
@@ -105,92 +111,113 @@ function toggleWin(id: WinId) {
   if (willOpen) focusWin(id);
 }
 
-const areaLevels = $derived(topLevelByArea(reports));
+const statuses = $derived(Object.values(statusByKey));
+const active = $derived(statuses.filter(isActive));
 
+// 地図の面で塗れるのは一次細分区域のものだけ。
+// 土砂災害は市町村等、地震は震央地名で、予報区の形を持たない
+const areaSeverity = $derived(topSeverityByArea(active));
+
+// 件数は区域ごとの最高段階で数える。
+// 同じ市区町村が複数の粒度で同時に出るため、素直に件数を足すと二重計上になる
 const counts = $derived.by(() => {
-  const c = { special: 0, warning: 0, advisory: 0 };
-  for (const lv of areaLevels.values()) {
-    if (lv === "special") c.special++;
-    else if (lv === "warning") c.warning++;
-    else if (lv === "advisory") c.advisory++;
+  const c = { emergency: 0, warning: 0, advisory: 0, info: 0 };
+  const top: Record<string, Severity> = {};
+  for (const s of active) {
+    if (!s.area) continue;
+    const cur = top[s.area.code];
+    if (!cur || SEVERITY_RANK[s.severity] > SEVERITY_RANK[cur]) top[s.area.code] = s.severity;
   }
+  for (const sev of Object.values(top)) c[sev]++;
   return c;
 });
 
-interface AreaRow {
+interface AreaGroup {
   areaCode: string;
   areaName: string;
-  prefCode: string;
-  prefName: string;
-  top: WarningLevel;
-  items: { code: string; status: string; level: WarningLevel }[];
-  reportedAt: string;
+  areaType: string;
+  prefCode: string | null;
+  prefName: string | null;
+  top: Severity;
+  items: BosaiStatus[];
+  /** 一次細分区域のものだけ地図の面に対応する */
+  onMap: boolean;
 }
 
-const allRows = $derived.by(() => {
-  const rows: AreaRow[] = [];
-  for (const rep of reports) {
-    for (const [areaCode, w] of rep.byArea) {
-      if (w.active.length === 0 || !w.top) continue;
-      const items = w.active
-        .map((a) => ({ ...a, level: warningLevel(a.code) }))
-        .sort((x, y) => LEVEL_RANK[y.level] - LEVEL_RANK[x.level]);
-      const prefCode = prefectureCodeOf(areaCode);
-      rows.push({
-        areaCode,
-        areaName: areas?.class10s[areaCode]?.name ?? areaCode,
-        prefCode,
-        prefName: prefectureName(prefCode),
-        top: w.top,
-        items,
-        reportedAt: rep.reportedAt,
-      });
-    }
+// 地域ごとにまとめる。仕様どおり、都道府県に束ねられるのは
+// 一次細分区域・市町村等・府県予報区だけ。
+// 震央地名・津波予報区・火山・河川は県に属さないので県名を付けない
+const groups = $derived.by(() => {
+  const byArea: Record<string, AreaGroup> = {};
+  for (const s of active) {
+    if (!s.area) continue;
+    const g = byArea[s.area.code] ?? (byArea[s.area.code] = {
+      areaCode: s.area.code,
+      areaName: s.area.name,
+      areaType: s.area.type,
+      prefCode: prefectureCodeOfArea(s.area),
+      prefName: null,
+      top: s.severity,
+      items: [],
+      onMap: s.area.type === "一次細分区域",
+    });
+    g.items.push(s);
+    if (SEVERITY_RANK[s.severity] > SEVERITY_RANK[g.top]) g.top = s.severity;
   }
-  return rows.sort(
-    (a, b) => LEVEL_RANK[b.top] - LEVEL_RANK[a.top] || a.areaCode.localeCompare(b.areaCode),
+  const list = Object.values(byArea);
+  for (const g of list) {
+    g.prefName = g.prefCode ? prefectureName(g.prefCode) : null;
+    g.items.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+  }
+  return list.sort(
+    (a, b) =>
+      SEVERITY_RANK[b.top] - SEVERITY_RANK[a.top] ||
+      (a.prefCode ?? "zz").localeCompare(b.prefCode ?? "zz") ||
+      a.areaCode.localeCompare(b.areaCode),
   );
 });
 
-// 県を選んでいればその県だけ、選んでいなければ全国
-const visibleRows = $derived(
-  selectedPref ? allRows.filter((r) => r.prefCode === selectedPref) : allRows,
+const visibleGroups = $derived(
+  selectedPref ? groups.filter((g) => g.prefCode === selectedPref) : groups,
 );
 
-const detailRow = $derived(allRows.find((r) => r.areaCode === selectedArea) ?? null);
+// 地図に面として出せないもの。「地図に無い＝危険が無い」と読まれないよう数を出す
+const offMapCount = $derived(visibleGroups.filter((g) => !g.onMap).length);
 
-// 気象庁の JSON は「いまの状態」しか返さないため、発表から解除までの帯は描けない。
-// 予報区ごとの最終発表時刻を直近6時間の軸に置く
+const detailGroup = $derived(groups.find((g) => g.areaCode === selectedArea) ?? null);
+
+// 発表からの経過。addressable event は履歴を残さないため、
+// いま存在するものの publishedAt から現在までしか描けない
 const timeLanes = $derived.by(() => {
-  const now = Date.now();
-  const span = 6 * 3600 * 1000;
-  const seen: Record<string, { name: string; at: number; top: WarningLevel }> = {};
-  for (const r of visibleRows) {
-    const at = new Date(r.reportedAt).getTime();
-    const cur = seen[r.areaCode];
-    if (!cur || at > cur.at) seen[r.areaCode] = { name: r.areaName, at, top: r.top };
-  }
-  return Object.values(seen)
-    .sort((a, b) => b.at - a.at)
+  const span = 12 * 3600 * 1000;
+  const from = now - span;
+  return visibleGroups
     .slice(0, 14)
-    .map((v) => ({
-      name: v.name,
-      top: v.top,
-      pos: Math.max(0, Math.min(100, ((v.at - (now - span)) / span) * 100)),
-      label: fmtClock(v.at),
-    }));
+    .map((g) => {
+      const started = Math.min(...g.items.map((i) => Date.parse(i.publishedAt) || now));
+      const left = Math.max(0, ((started - from) / span) * 100);
+      return {
+        key: g.areaCode,
+        name: g.prefName ? `${g.prefName} ${g.areaName}` : g.areaName,
+        top: g.top,
+        left,
+        width: Math.max(1.5, 100 - left),
+        label: fmtClock(started),
+      };
+    })
+    .sort((a, b) => a.left - b.left);
 });
 
 const BASE: PathOptions = { color: "#41545c", weight: 0.55, fillColor: "#1e2a2f", fillOpacity: 1 };
 
 function styleOf(props: AreaFeatureProps): PathOptions {
-  const lv = layerOn.warning ? areaLevels.get(props.code) : undefined;
+  const lv = layerOn.warning ? areaSeverity.get(props.code) : undefined;
   const inPref = props.prefCode === selectedPref;
   const isSel = props.code === selectedArea;
   return {
     color: isSel ? "#cfe6f2" : inPref ? "#7fb2c9" : BASE.color,
     weight: isSel ? 1.8 : inPref ? 1.1 : BASE.weight,
-    fillColor: lv ? LEVEL_COLOR[lv] : BASE.fillColor,
+    fillColor: lv ? SEVERITY_COLOR[lv] : BASE.fillColor,
     // ハザードマップを出しているときは、下のラスタが見えるよう塗りを薄くする。
     // 警報の色は残したいので、発表なしの区域だけ完全に透かす
     fillOpacity: hazardActive ? (lv ? 0.3 : 0) : lv ? (lv === "advisory" ? 0.55 : 0.72) : 1,
@@ -207,7 +234,8 @@ function restyle() {
 
 function pickArea(areaCode: string) {
   selectedArea = areaCode;
-  selectedPref = prefectureCodeOf(areaCode);
+  const g = groups.find((x) => x.areaCode === areaCode);
+  selectedPref = g?.prefCode ?? prefectureCodeOf(areaCode);
   if (!openWins.includes("detail")) toggleWin("detail");
   else focusWin("detail");
   restyle();
@@ -272,9 +300,10 @@ onMount(async () => {
   if (!browser) return;
   try {
     // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
-    const [mod, a, g] = await Promise.all([import("leaflet"), fetchAreas(), fetchClass10Geo()]);
+    // 地域名は 30830 のレコードが持っているので area.json は要らない。
+    // 取るのは地図のポリゴンだけ
+    const [mod, g] = await Promise.all([import("leaflet"), fetchClass10Geo()]);
     const L = mod.default ?? mod;
-    areas = a;
 
     for (const f of (g as AreaGeoJson).features) {
       f.properties.prefCode = prefectureCodeOf(f.properties.code);
@@ -329,14 +358,16 @@ onMount(async () => {
     map = m;
     phase = "ready";
 
-    // 全国58予報区ぶん。地図の塗り分けに要るが時間がかかるので、
-    // 地図を出してから追いかけて取る
-    const res = await fetchAllWarnings(a, {
-      onProgress: (done, total) => (progress = { done, total }),
+    // 防災ステータスを購読する。気象庁への全国ポーリングは不要になった
+    bosaiSub = await subscribeBosaiStatus((st) => {
+      statusByKey = { ...statusByKey, [st.key]: st };
+      received++;
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+      stalled = false;
+      restyle();
     });
-    reports = res.reports;
-    failedOffices = res.failed;
-    restyle();
+    stallTimer = setTimeout(() => { if (received === 0) stalled = true; }, 12000);
+    nowTimer = setInterval(() => (now = Date.now()), 30000);
   } catch (e) {
     errorText = e instanceof Error ? e.message : String(e);
     phase = "error";
@@ -344,6 +375,10 @@ onMount(async () => {
 });
 
 onDestroy(() => {
+  if (stallTimer) clearTimeout(stallTimer);
+  bosaiSub?.close();
+  bosaiSub = null;
+  if (nowTimer) clearInterval(nowTimer);
   map?.remove();
   map = null;
   areaLayer = null;
@@ -376,19 +411,23 @@ const DOCK: [WinId, string][] = [
     <span class="brand">防災オペレーション</span>
     <div class="counts">
       <div class="cnt">
-        <b style="color: {LEVEL_COLOR.special}">{counts.special}</b><span>特別警報</span>
+        <b style="color: {SEVERITY_COLOR.emergency}">{counts.emergency}</b><span>切迫</span>
       </div>
       <div class="cnt">
-        <b style="color: {LEVEL_COLOR.warning}">{counts.warning}</b><span>警報</span>
+        <b style="color: {SEVERITY_COLOR.warning}">{counts.warning}</b><span>警報</span>
       </div>
       <div class="cnt">
-        <b style="color: {LEVEL_COLOR.advisory}">{counts.advisory}</b><span>注意報</span>
+        <b style="color: {SEVERITY_COLOR.advisory}">{counts.advisory}</b><span>注意報</span>
       </div>
-      <div class="cnt"><b>{allRows.length}</b><span>発令中の区域</span></div>
+      <div class="cnt"><b>{groups.length}</b><span>発令中の地域</span></div>
     </div>
     <span class="grow"></span>
-    {#if progress.total > 0 && progress.done < progress.total}
-      <span class="mono dim pad">取得中 {progress.done}/{progress.total}</span>
+    {#if stalled}
+      <span class="pad stall">リレーから受信できていません（{BOSAI_RELAY}）</span>
+    {:else if received === 0}
+      <span class="mono dim pad">受信待ち</span>
+    {:else}
+      <span class="mono dim pad">{received} 件受信</span>
     {/if}
     {#if selectedPref}
       <button class="ghost" onclick={resetView}>全国へ戻す</button>
@@ -429,37 +468,42 @@ const DOCK: [WinId, string][] = [
       </p>
     {/if}
 
-    {#if failedOffices.length > 0}
-      <p class="failbar">
-        {failedOffices.length} 件の予報区を取得できませんでした。表示は取得できたぶんのみです。
-      </p>
-    {/if}
-
     {#if phase === "ready" && openWins.includes("list")}
       <OpsWindow
         title={selectedPref ? `発令中 / ${prefectureName(selectedPref)}` : "発令中一覧（全国）"}
-        sub="{visibleRows.length}区域"
+        sub="{visibleGroups.length}地域"
         geom={geom.list}
         z={zOf("list")}
         focused={zOrder.at(-1) === "list"}
         onfocus={() => focusWin("list")}
         onclose={() => toggleWin("list")}
       >
-        {#if visibleRows.length === 0}
-          <p class="empty">発表中の警報・注意報はありません</p>
+        {#if visibleGroups.length === 0}
+          <p class="empty">発表中の情報はありません</p>
         {/if}
-        {#each visibleRows as r (r.areaCode)}
+        {#if offMapCount > 0}
+          <p class="note">
+            {offMapCount} 地域は地図に面で出せません（土砂災害は市町村、地震は震央地名など、
+            予報区の形を持たないため）。地図に無いことは危険が無いことを意味しません。
+          </p>
+        {/if}
+        {#each visibleGroups as g (g.areaCode)}
           <button
             class="row"
-            class:sel={r.areaCode === selectedArea}
-            onclick={() => pickArea(r.areaCode)}
+            class:sel={g.areaCode === selectedArea}
+            onclick={() => pickArea(g.areaCode)}
           >
-            <i class="bar-{r.top}"></i>
+            <i class="bar-{g.top}"></i>
             <span class="mid">
-              <span class="ttl">{r.areaName}</span>
-              <span class="sub">{r.prefName} ／ {r.items.length}件</span>
+              <span class="ttl">
+                {#if g.prefName}<span class="pref">{g.prefName}</span>{/if}{g.areaName}
+              </span>
+              <span class="sub">
+                {g.items.map((i) => HAZARD_LABEL[i.hazard]).filter((v, i, a) => a.indexOf(v) === i).join("・")}
+                ／ {g.items.length}件{#if !g.onMap} ／ <span class="offmap">{g.areaType}</span>{/if}
+              </span>
             </span>
-            <span class="tag tag-{r.top}">{LEVEL_LABEL[r.top]}</span>
+            <span class="tag tag-{g.top}">{SEVERITY_LABEL[g.top]}</span>
           </button>
         {/each}
       </OpsWindow>
@@ -468,29 +512,38 @@ const DOCK: [WinId, string][] = [
     {#if phase === "ready" && openWins.includes("detail")}
       <OpsWindow
         title="詳細"
-        sub={detailRow ? detailRow.prefName : ""}
+        sub={detailGroup?.prefName ?? detailGroup?.areaType ?? ""}
         geom={geom.detail}
         z={zOf("detail")}
         focused={zOrder.at(-1) === "detail"}
         onfocus={() => focusWin("detail")}
         onclose={() => toggleWin("detail")}
       >
-        {#if !detailRow}
-          <p class="empty">地図か一覧から区域を選んでください</p>
+        {#if !detailGroup}
+          <p class="empty">地図か一覧から地域を選んでください</p>
         {:else}
           <div class="detail">
-            <div class="place">{detailRow.areaName}</div>
-            <div class="meta mono">{detailRow.prefName} ／ {detailRow.areaCode}</div>
-            <!-- 警報は「区域 × 種別」で同時に複数出る。ブロックで並べると数と種類が一目で掴める -->
+            <div class="place">{detailGroup.areaName}</div>
+            <div class="meta mono">
+              {detailGroup.prefName ?? "—"} ／ {detailGroup.areaType} ／ {detailGroup.areaCode}
+            </div>
+            <!-- 同じ地域に複数の情報が同時に出る。ブロックで並べると数と種類が一目で掴める -->
             <div class="chips">
-              {#each detailRow.items as it (it.code)}
-                <span class="chip lv-{it.level}">
-                  {warningName(it.code)}
-                  {#if it.status === "発表"}<b class="fresh">発表</b>{/if}
-                </span>
+              {#each detailGroup.items as it (it.key)}
+                <span class="chip lv-{it.severity}">{it.headline}</span>
               {/each}
             </div>
-            <div class="meta">発表 {fmtStamp(detailRow.reportedAt)}</div>
+            <div class="hist">
+              {#each detailGroup.items as it (it.key)}
+                <div class="h">
+                  <span class="tm mono">{fmtStamp(it.publishedAt)}</span>
+                  <span class="dim">{HAZARD_LABEL[it.hazard]}</span>
+                  {#if it.updatedAt !== it.publishedAt}
+                    <span class="dim">更新 {fmtStamp(it.updatedAt)}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
           </div>
         {/if}
       </OpsWindow>
@@ -499,7 +552,7 @@ const DOCK: [WinId, string][] = [
     {#if phase === "ready" && openWins.includes("timeline")}
       <OpsWindow
         title="発表時刻"
-        sub="直近6時間"
+        sub="直近12時間"
         geom={geom.timeline}
         z={zOf("timeline")}
         focused={zOrder.at(-1) === "timeline"}
@@ -507,13 +560,15 @@ const DOCK: [WinId, string][] = [
         onclose={() => toggleWin("timeline")}
       >
         <p class="note">
-          気象庁の JSON は現在の状態のみを返すため、発表から解除までの帯は描けません。
-          予報区ごとの最終発表時刻を並べています。
+          発表から現在までの帯です。addressable event は履歴を残さないため、
+          いま発表中のものしか描けません。解除済みのものは残りません。
         </p>
-        {#each timeLanes as l (l.name)}
+        {#each timeLanes as l (l.key)}
           <div class="lane">
             <span class="nm">{l.name}</span>
-            <span class="tk"><i style="left: {l.pos}%; background: {LEVEL_COLOR[l.top]}"></i></span>
+            <span class="tk">
+              <i style="left: {l.left}%; width: {l.width}%; background: {SEVERITY_COLOR[l.top]}"></i>
+            </span>
             <span class="tm mono">{l.label}</span>
           </div>
         {/each}
@@ -532,13 +587,13 @@ const DOCK: [WinId, string][] = [
     </div>
 
     <p class="credit">
-      出典: 気象庁{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
+      出典: 気象庁（eew2nostr 経由）{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
     </p>
 
     <div class="legend">
-      {#each ["special", "warning", "advisory"] as lv (lv)}
+      {#each ["emergency", "warning", "advisory"] as lv (lv)}
         <span>
-          <i style="background: {LEVEL_COLOR[lv as WarningLevel]}"></i>{LEVEL_LABEL[lv as WarningLevel]}
+          <i style="background: {SEVERITY_COLOR[lv as Severity]}"></i>{SEVERITY_LABEL[lv as Severity]}
         </span>
       {/each}
     </div>
@@ -559,6 +614,7 @@ const DOCK: [WinId, string][] = [
 .dim { color: #8d9aa0; font-size: 12px; }
 .grow { flex: 1; }
 .pad { padding: 0 12px; align-self: center; }
+.stall { color: #f0a2ae; font-size: 12px; }
 
 .bar {
   flex: none;
@@ -803,10 +859,10 @@ const DOCK: [WinId, string][] = [
     text-overflow: ellipsis;
   }
 }
-.bar-special { background: #a50021; }
+.bar-emergency { background: #a50021; }
 .bar-warning { background: #ff2800; }
 .bar-advisory { background: #f2e700; }
-.bar-other { background: #5d6c73; }
+.bar-info { background: #5d6c73; }
 
 .tag {
   align-self: center;
@@ -816,10 +872,10 @@ const DOCK: [WinId, string][] = [
   font-size: 10px;
   font-weight: 700;
 }
-.tag-special { background: #a50021; color: #fff; }
+.tag-emergency { background: #a50021; color: #fff; }
 .tag-warning { background: #ff2800; color: #fff; }
 .tag-advisory { background: #f2e700; color: #241f00; }
-.tag-other { background: #2b373d; color: #c8d3d8; }
+.tag-info { background: #2b373d; color: #c8d3d8; }
 
 .detail { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .place { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
@@ -835,10 +891,13 @@ const DOCK: [WinId, string][] = [
   font-weight: 700;
 }
 .fresh { font-size: 9px; padding: 1px 4px; border-radius: 2px; background: rgba(0, 0, 0, 0.3); }
-.lv-special { background: #a50021; color: #fff; }
+.lv-emergency { background: #a50021; color: #fff; }
 .lv-warning { background: #ff2800; color: #fff; }
 .lv-advisory { background: #f2e700; color: #241f00; }
-.lv-other { background: #2b373d; color: #c8d3d8; }
+.lv-info { background: #2b373d; color: #c8d3d8; }
+
+.pref { color: #8d9aa0; margin-right: 5px; font-weight: 400; }
+.offmap { color: #c9a227; }
 
 .lane {
   display: flex;
@@ -856,7 +915,7 @@ const DOCK: [WinId, string][] = [
     text-overflow: ellipsis;
   }
   .tk { flex: 1; height: 12px; background: #1a2327; border-radius: 2px; position: relative; }
-  .tk i { position: absolute; top: 1px; bottom: 1px; width: 3px; border-radius: 1px; }
+  .tk i { position: absolute; top: 1px; bottom: 1px; border-radius: 1px; min-width: 2px; }
   .tm { font-size: 10px; color: #6d7c83; flex: none; }
 }
 
