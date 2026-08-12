@@ -1,672 +1,416 @@
 <script lang="ts">
-import { getUnixTime, subDays } from "date-fns";
-import type { Event } from "nostr-tools/core";
-import EEWItem from "$lib/components/main/eewItem.svelte";
-import EEWDetail from "$lib/components/main/eewDetail.svelte";
-import EEWLatest from "$lib/components/main/latestEewDetail.svelte";
-import { SimplePool } from "nostr-tools/pool";
 import { onMount, onDestroy } from "svelte";
-import { SvelteMap } from "svelte/reactivity";
-import { browser } from '$app/environment';
+import { browser } from "$app/environment";
+import type { Map as LMap, GeoJSON as LGeoJSON, PathOptions, Layer } from "leaflet";
+import type { Feature, MultiPolygon } from "geojson";
+import "leaflet/dist/leaflet.css";
+import {
+  fetchAreas,
+  fetchClass10Geo,
+  fetchWarningsForPrefecture,
+  prefectureCodeOf,
+  type AreaDict,
+  type AreaGeoJson,
+  type AreaFeatureProps,
+  type WarningReport,
+} from "$lib/jma/api";
+import { prefectureName } from "$lib/jma/prefectures";
+import {
+  LEVEL_COLOR,
+  LEVEL_LABEL,
+  LEVEL_RANK,
+  warningLevel,
+  warningName,
+  type WarningLevel,
+} from "$lib/jma/warningCodes";
 
-const pool = new SimplePool();
-const relays = [
-	"wss://relay-jp.shino3.net",
-	"wss://r.kojira.io",
-	"wss://yabu.me",
+type Phase = "loading" | "ready" | "error";
+
+let phase = $state<Phase>("loading");
+let errorText = $state("");
+let areas = $state<AreaDict | null>(null);
+
+let selectedPref = $state<string | null>(null);
+let selectedName = $state("");
+let reports = $state<WarningReport[]>([]);
+let failedOffices = $state<string[]>([]);
+let loadingPref = $state(false);
+
+let mapEl: HTMLDivElement;
+let map: LMap | null = null;
+let areaLayer: LGeoJSON | null = null;
+
+// 本土と南西諸島が収まる範囲。南鳥島(154E)や沖ノ鳥島(20.4N)まで含めると
+// 地図が極端に小さくなるため、初期表示からは外す（移動すれば見える）
+const HOME_BOUNDS: [[number, number], [number, number]] = [
+  [24.0, 122.9],
+  [45.7, 146.2],
 ];
 
-const yesterday = getUnixTime(subDays(new Date(), 7));
-const eews = new SvelteMap<string, Event[]>();
-let selectedId = $state<string | null>(null);
-let isMobileMenuOpen = $state(false); // モバイルメニューの開閉状態
-const eewEntries = $derived(Array.from(eews.entries()));
+const BASE_STYLE: PathOptions = {
+  color: "#41545c",
+  weight: 0.6,
+  fillColor: "#1e2a2f",
+  fillOpacity: 1,
+};
+const SELECTED_STYLE: PathOptions = {
+  color: "#7fb2c9",
+  weight: 1.2,
+  fillColor: "#2b3f4d",
+  fillOpacity: 1,
+};
 
-// selectedIdとeewsマップの両方に依存するリアクティブ計算
-const selectedEvents = $derived.by(() => {
-	if (!selectedId) {
-		return [];
-	}
-	const events = eews.get(selectedId) ?? [];
-	// sort は破壊的なので、Map に入っている配列をそのまま並べ替えない
-	return [...events].sort((a, b) => a.created_at - b.created_at);
+// 選択中の県の、区域ごとの発令内容。□ブロックで並べる元
+const blocks = $derived.by(() => {
+  const out: {
+    areaCode: string;
+    areaName: string;
+    items: { code: string; status: string; level: WarningLevel }[];
+  }[] = [];
+  for (const rep of reports) {
+    for (const [areaCode, w] of rep.byArea) {
+      if (w.active.length === 0) continue;
+      const items = w.active
+        .map((a) => ({ ...a, level: warningLevel(a.code) }))
+        .sort((x, y) => LEVEL_RANK[y.level] - LEVEL_RANK[x.level]);
+      out.push({ areaCode, areaName: areas?.class10s[areaCode]?.name ?? areaCode, items });
+    }
+  }
+  return out.sort((a, b) => LEVEL_RANK[b.items[0].level] - LEVEL_RANK[a.items[0].level]);
 });
 
-const latestEvent = $derived(
-	selectedEvents.length > 0 ? selectedEvents[selectedEvents.length - 1] : null,
+const quietAreas = $derived(
+  reports.reduce(
+    (n, r) => n + [...r.byArea.values()].filter((w) => w.active.length === 0).length,
+    0,
+  ),
 );
 
-const latestEews = $derived(eewEntries
-	.map(([eventId, events]) => {
-		const latest = [...events]
-			.sort((a, b) => a.created_at - b.created_at)
-			.at(-1);
-		if (!latest) return null;
-		const parsed = JSON.parse(latest.content);
-		const forecast = !parsed.body.intensity
-			? "不明"
-			: parsed.body.intensity.forecastMaxInt.to === "over"
-				? "不明"
-				: parsed.body.intensity.forecastMaxInt.to;
-		return {
-			id: eventId,
-			created: latest.created_at,
-			forecast,
-			magnitude: parsed.body.earthquake.magnitude.value,
-			hypocenter: parsed.body.earthquake.hypocenter.name,
-			depth: parsed.body.earthquake.hypocenter.depth.value,
-			originTime: new Date(parsed.body.earthquake.originTime),
-		};
-	})
-	.filter((item) => !!item)
-	.sort((a, b) => b.created - a.created));
+const reportedAt = $derived(reports[0]?.reportedAt ?? "");
 
-// 自動選択ロジック：リストがあり、何も選択されていない場合は最新のものを選択。
-// 派生値ではなく selectedId への代入なので $derived ではなく $effect を使う。
-$effect(() => {
-	if (latestEews.length > 0 && !selectedId) {
-		selectedId = latestEews[0].id;
-	}
-});
-
-// メニュー開閉関数
-function toggleMobileMenu() {
-	isMobileMenuOpen = !isMobileMenuOpen;
+function restyle() {
+  areaLayer?.eachLayer((l: Layer) => {
+    const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> })
+      .feature;
+    if (!f) return;
+    const on = selectedPref !== null && f.properties.prefCode === selectedPref;
+    (l as Layer & { setStyle: (s: PathOptions) => void }).setStyle(
+      on ? SELECTED_STYLE : BASE_STYLE,
+    );
+  });
 }
 
-function closeMobileMenu() {
-	isMobileMenuOpen = false;
+async function selectPrefecture(prefCode: string) {
+  if (!areas) return;
+  selectedPref = prefCode;
+  selectedName = prefectureName(prefCode);
+  restyle();
+  zoomToPrefecture(prefCode);
+
+  loadingPref = true;
+  reports = [];
+  failedOffices = [];
+  try {
+    const res = await fetchWarningsForPrefecture(areas, prefCode);
+    // 取得中に別の県へ切り替わっていたら捨てる
+    if (selectedPref !== prefCode) return;
+    reports = res.reports;
+    failedOffices = res.failed;
+  } catch (e) {
+    errorText = e instanceof Error ? e.message : String(e);
+  } finally {
+    if (selectedPref === prefCode) loadingPref = false;
+  }
 }
 
-// EEW選択時にモバイルメニューを閉じる
-function selectEEW(id: string) {
-	selectedId = id;
-	if (browser && window.innerWidth <= 768) {
-		closeMobileMenu();
-	}
+function zoomToPrefecture(prefCode: string) {
+  if (!map || !areaLayer) return;
+  let bounds: ReturnType<LGeoJSON["getBounds"]> | null = null;
+  areaLayer.eachLayer((l: Layer) => {
+    const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> })
+      .feature;
+    if (!f || f.properties.prefCode !== prefCode) return;
+    const b = (l as Layer & { getBounds: () => ReturnType<LGeoJSON["getBounds"]> }).getBounds();
+    bounds = bounds ? bounds.extend(b) : b;
+  });
+  if (bounds) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 9 });
 }
 
-const filter = {
-	kinds: [7078],
-	"#d": ["eew_alert_system_by_shino3"],
-	since: yesterday,
-};
-onMount(() => {
-	pool.subscribe(relays, filter, {
-		onevent(ev) {
-			const { eventId } = JSON.parse(ev.content);
-			const arr = eews.get(eventId) ?? [];
-			// SvelteMap なので set がそのまま更新として伝播する
-			eews.set(eventId, [...arr, ev]);
-		},
-	});
-	
-	// イベントリスナーの追加（ブラウザ環境でのみ）
-	if (browser) {
-		window.addEventListener('keydown', handleKeydown);
-		window.addEventListener('resize', handleResize);
-	}
+function resetView() {
+  selectedPref = null;
+  reports = [];
+  failedOffices = [];
+  restyle();
+  map?.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
+}
+
+onMount(async () => {
+  if (!browser) return;
+  try {
+    // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
+    const [mod, a, g] = await Promise.all([
+      import("leaflet"),
+      fetchAreas(),
+      fetchClass10Geo(),
+    ]);
+    const L = mod.default ?? mod;
+    areas = a;
+
+    // 予報区コードから都道府県コードを持たせておく。選択に使う
+    for (const f of (g as AreaGeoJson).features) {
+      f.properties.prefCode = prefectureCodeOf(f.properties.code);
+    }
+
+    // 背景タイルは張らない。予報区のポリゴンそのものを白地図として描く
+    const m = L.map(mapEl, {
+      zoomControl: true,
+      attributionControl: false,
+      // 予報区の形が正しく読めればよいので、回転や傾きは要らない
+      minZoom: 3,
+      maxZoom: 12,
+    });
+    m.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
+
+    areaLayer = L.geoJSON(g as AreaGeoJson, {
+      style: () => BASE_STYLE,
+      onEachFeature: (feature, layer) => {
+        const pref = (feature.properties as AreaFeatureProps).prefCode;
+        if (!pref) return;
+        layer.on("click", () => void selectPrefecture(pref));
+        layer.bindTooltip((feature.properties as AreaFeatureProps).name, {
+          sticky: true,
+          direction: "top",
+        });
+      },
+    }).addTo(m);
+
+    map = m;
+    phase = "ready";
+  } catch (e) {
+    errorText = e instanceof Error ? e.message : String(e);
+    phase = "error";
+  }
 });
 
 onDestroy(() => {
-	// イベントリスナーのクリーンアップ（ブラウザ環境でのみ）
-	if (browser) {
-		window.removeEventListener('keydown', handleKeydown);
-		window.removeEventListener('resize', handleResize);
-	}
+  map?.remove();
+  map = null;
+  areaLayer = null;
 });
 
-// キーボードイベントハンドラ
-function handleKeydown(event: KeyboardEvent) {
-	if (event.key === 'Escape' && isMobileMenuOpen) {
-		closeMobileMenu();
-	}
-}
-
-// ウィンドウリサイズ時の処理
-function handleResize() {
-	if (browser && window.innerWidth > 768 && isMobileMenuOpen) {
-		closeMobileMenu();
-	}
-}
-
-// キーボードイベントハンドラー（EEWアイテム用）
-function handleEEWItemKeydown(event: KeyboardEvent, itemId: string) {
-	if (event.key === 'Enter' || event.key === ' ') {
-		event.preventDefault();
-		selectEEW(itemId);
-	}
+function fmtTime(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 </script>
 
-<!-- <div class="top-right-checkbox form-check">
-  <input class="form-check-input" type="checkbox" id="testModeCheckbox" bind:checked={$isTestMode}>
-  <label class="form-check-label" for="testModeCheckbox">テストモード</label>
-</div> -->
+<svelte:head><title>防災ダッシュボード</title></svelte:head>
 
-<!-- <NostrApp {relays}>
-  <UniqueEventList
-  >
-    <div slot="loading">
-      <p>Loading...</p>
-    </div>
+<div class="board">
+  <header class="bar">
+    <span class="beacon" class:live={phase === "ready"}></span>
+    <span class="brand">防災ダッシュボード</span>
+    <span class="grow"></span>
+    {#if selectedPref}
+      <button class="ghost" onclick={resetView}>全国へ戻す</button>
+    {/if}
+  </header>
 
-    <div slot="error" let:error>
-      <p>{error}</p>
-    </div>
-
-  </UniqueEventList>
-</NostrApp> -->
-<div class="admin-console">
-  <!-- モバイル用オーバーレイ -->
-  {#if isMobileMenuOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="mobile-overlay" onclick={closeMobileMenu}></div>
-  {/if}
-
-  <!-- サイドバー -->
-  <div class="sidebar" class:mobile-open={isMobileMenuOpen}>
-    <div class="sidebar-header">
-      <div class="status-indicator">
-        <span class="status-dot"></span>
-        受信中
+  <div class="mapwrap">
+    <div class="map" bind:this={mapEl}></div>
+    {#if phase === "loading"}
+      <div class="overlay"><span>気象庁のデータを取得しています…</span></div>
+    {:else if phase === "error"}
+      <div class="overlay err">
+        <strong>地図を表示できませんでした</strong>
+        <span>{errorText}</span>
       </div>
-      <!-- モバイル用閉じるボタン -->
-      <button 
-        class="mobile-close-btn" 
-        onclick={closeMobileMenu}
-        aria-label="メニューを閉じる"
-      >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="18" y1="6" x2="6" y2="18"></line>
-          <line x1="6" y1="6" x2="18" y2="18"></line>
-        </svg>
-      </button>
-    </div>
-    <div class="eew-list">
-      {#if eewEntries.length > 0}
-        {#each latestEews as item (item.id)}
-          <div 
-            class="eew-item-wrapper" 
-            class:selected={selectedId === item.id}
-            role="button"
-            tabindex="0"
-            onclick={() => selectEEW(item.id)}
-            onkeydown={(e) => handleEEWItemKeydown(e, item.id)}
-            aria-label="EEW {item.hypocenter} 震度{item.forecast} マグニチュード{item.magnitude}"
-          >
-            <EEWItem {item} selected={selectedId === item.id}></EEWItem>
+    {/if}
+    {#if phase === "ready" && !selectedPref}
+      <div class="hint">地図の県をタップすると、発令中の警報・注意報が並びます</div>
+    {/if}
+    <div class="credit">出典: 気象庁</div>
+  </div>
+
+  <section class="deck">
+    {#if !selectedPref}
+      <div class="empty">県が選ばれていません</div>
+    {:else}
+      <div class="deck-head">
+        <strong>{selectedName}</strong>
+        {#if loadingPref}
+          <span class="dim">取得中…</span>
+        {:else}
+          <span class="dim">{blocks.length} 区域で発令中 ／ {quietAreas} 区域は発表なし</span>
+        {/if}
+        <span class="grow"></span>
+        {#if reportedAt}<span class="mono dim">{fmtTime(reportedAt)} 発表</span>{/if}
+      </div>
+
+      {#if failedOffices.length > 0}
+        <p class="warn">
+          一部の予報区を取得できませんでした（{failedOffices.join(", ")}）。表示は取得できたぶんのみです。
+        </p>
+      {/if}
+
+      <div class="deck-body">
+        {#if !loadingPref && blocks.length === 0}
+          <div class="empty">発表中の警報・注意報はありません</div>
+        {/if}
+        {#each blocks as b (b.areaCode)}
+          <div class="areablock">
+            <div class="areaname">{b.areaName}</div>
+            <div class="chips">
+              {#each b.items as it (it.code)}
+                <span class="chip lv-{it.level}" title={LEVEL_LABEL[it.level]}>
+                  <span class="cname">{warningName(it.code)}</span>
+                  {#if it.status === "発表"}<span class="fresh">発表</span>{/if}
+                </span>
+              {/each}
+            </div>
           </div>
         {/each}
-      {:else}
-        <div class="no-data">
-          <p>EEWイベントを受信していません</p>
-        </div>
-      {/if}
-    </div>
-  </div>
+      </div>
 
-  <!-- メインコンテンツ -->
-  <div class="main-content">
-    <div class="content-header">
-      <!-- モバイル用メニューボタン -->
-      <button 
-        class="mobile-menu-btn" 
-        onclick={toggleMobileMenu}
-        aria-label="メニューを開く"
-      >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="3" y1="6" x2="21" y2="6"></line>
-          <line x1="3" y1="12" x2="21" y2="12"></line>
-          <line x1="3" y1="18" x2="21" y2="18"></line>
-        </svg>
-      </button>
-      {#if selectedId}
-        <h1 class="eew-title">EEW {selectedId}</h1>
-      {:else}
-        <h1 class="eew-title">EEW ビューアー</h1>
-      {/if}
-    </div>
-    
-    <div class="detail-section">
-      {#if selectedId && selectedEvents.length > 0 && latestEvent}
-        <div class="latest-info">
-          <div class="latest-card">
-            <EEWLatest content={latestEvent.content}></EEWLatest>
-          </div>
-        </div>
-        
-        <div class="timeline-section">
-          <div class="timeline">
-            {#each selectedEvents.slice().reverse() as ev, index (ev.id)}
-              <div class="timeline-item" class:latest={index === 0}>
-                <div class="timeline-marker">
-                  <div class="timeline-dot"></div>
-                  {#if index < selectedEvents.length - 1}
-                    <div class="timeline-line"></div>
-                  {/if}
-                </div>
-                <div class="timeline-content">
-                  <div class="update-number">第{selectedEvents.length - index}報</div>
-                  <EEWDetail content={ev.content}></EEWDetail>
-                </div>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {:else if latestEews.length === 0}
-        <div class="no-selection">
-          <div class="placeholder">
-            <h3>EEWイベントを受信中...</h3>
-            <p>EEWが受信されると自動的に表示されます</p>
-          </div>
-        </div>
-      {/if}
-    </div>
-  </div>
+      <div class="legend">
+        {#each ["special", "warning", "advisory"] as lv (lv)}
+          <span>
+            <i style="background: {LEVEL_COLOR[lv as WarningLevel]}"></i>{LEVEL_LABEL[lv as WarningLevel]}
+          </span>
+        {/each}
+      </div>
+    {/if}
+  </section>
 </div>
 
 <style lang="scss">
-.admin-console {
-  display: flex;
-  height: 100vh;
-  background-color: #1a1a1a;
-  color: #e0e0e0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  position: relative;
-  
-  /* モバイル対応 */
-  @media (max-width: 768px) {
-    flex-direction: row; /* 2カラムを維持 */
-  }
-}
-
-/* モバイル用オーバーレイ */
-.mobile-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background-color: rgba(0, 0, 0, 0.5);
-  z-index: 998;
-  display: none;
-  
-  @media (max-width: 768px) {
-    display: block;
-  }
-}
-
-/* モバイル用メニューボタン */
-.mobile-menu-btn {
-  display: none;
-  background: none;
-  border: none;
-  color: #ffffff;
-  padding: 0.5rem;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: background-color 0.2s ease;
-  
-  &:hover {
-    background-color: #404040;
-  }
-  
-  @media (max-width: 768px) {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-}
-
-/* モバイル用閉じるボタン */
-.mobile-close-btn {
-  display: none;
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  background: none;
-  border: none;
-  color: #ffffff;
-  padding: 0.5rem;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: background-color 0.2s ease;
-  
-  &:hover {
-    background-color: #404040;
-  }
-  
-  @media (max-width: 768px) {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-}
-
-.sidebar {
-  width: 380px;
-  min-width: 380px;
-  background-color: #2d2d2d;
-  border-right: 1px solid #404040;
+.board {
   display: flex;
   flex-direction: column;
-  
-  /* モバイル対応 */
-  @media (max-width: 768px) {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 320px;
-    min-width: 320px;
-    height: 100vh;
-    z-index: 999;
-    transform: translateX(-100%);
-    transition: transform 0.3s ease;
-    border-right: none;
-    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.3);
-    
-    &.mobile-open {
-      transform: translateX(0);
-    }
-  }
-  
-  .sidebar-header {
-    padding: 1.5rem 1rem;
-    border-bottom: 1px solid #404040;
-    background-color: #333;
-    position: relative;
-    
-    /* モバイル対応 */
-    @media (max-width: 768px) {
-      padding: 1rem 3rem 1rem 1rem; /* 右側に閉じるボタンの余白 */
-    }
-    
-    .status-indicator {
-      display: flex;
-      align-items: center;
-      font-size: 0.875rem;
-      color: #a0a0a0;
-      
-      .status-dot {
-        width: 8px;
-        height: 8px;
-        background-color: #4ade80;
-        border-radius: 50%;
-        margin-right: 0.5rem;
-        animation: pulse 2s infinite;
-      }
-    }
-  }
-  
-  .eew-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0.25rem;
-    
-    .eew-item-wrapper {
-      cursor: pointer;
-      border-radius: 4px;
-      transition: all 0.2s ease;
-      
-      /* モバイル対応：タップしやすいサイズ */
-      @media (max-width: 768px) {
-        min-height: 48px;
-      }
-      
-      &:hover {
-        background-color: #3a3a3a;
-      }
-      
-      &.selected {
-        background-color: #4f46e5;
-        box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
-      }
-    }
-    
-    .no-data {
-      padding: 1.5rem;
-      text-align: center;
-      color: #a0a0a0;
-      
-      /* モバイル対応 */
-      @media (max-width: 768px) {
-        padding: 1rem;
-        font-size: 0.875rem;
-      }
-    }
-  }
+  height: 100vh;
+  background: #080b0d;
+  color: #e2e9ec;
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
 }
 
-.main-content {
-  flex: 1;
+.bar {
+  flex: none;
   display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  
-  /* モバイル対応 */
-  @media (max-width: 768px) {
-    width: 100%;
-    height: 100vh;
-  }
-  
-  .content-header {
-    padding: 1.5rem 2rem;
-    border-bottom: 1px solid #404040;
-    background-color: #242424;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    
-    /* モバイル対応 */
-    @media (max-width: 768px) {
-      padding: 1rem;
-      gap: 0.75rem;
-    }
-    
-    .eew-title {
-      margin: 0;
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: #ffffff;
-      font-family: monospace;
-      flex: 1;
-      
-      /* モバイル対応 */
-      @media (max-width: 768px) {
-        font-size: 1.125rem;
-      }
-    }
-  }
-  
-  .detail-section {
-    flex: 1;
-    overflow-y: auto;
-    padding: 2rem;
-    
-    /* モバイル対応 */
-    @media (max-width: 768px) {
-      padding: 1rem;
-    }
-    
-    .latest-info {
-      margin-bottom: 2rem;
-      
-      /* モバイル対応 */
-      @media (max-width: 768px) {
-        margin-bottom: 1rem;
-      }
-      
-      .latest-card {
-        background-color: #2d2d2d;
-        border: 1px solid #404040;
-        border-radius: 8px;
-        padding: 1.5rem;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-        
-        /* モバイル対応 */
-        @media (max-width: 768px) {
-          padding: 1rem;
-          border-radius: 6px;
-        }
-      }
-    }
-    
-    .timeline-section {
-      .timeline {
-        position: relative;
-        
-        .timeline-item {
-          display: flex;
-          margin-bottom: 1.5rem;
-          
-          /* モバイル対応 */
-          @media (max-width: 768px) {
-            margin-bottom: 1rem;
-          }
-          
-          &.latest .timeline-dot {
-            background-color: #f59e0b;
-            box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
-          }
-          
-          .timeline-marker {
-            position: relative;
-            margin-right: 1rem;
-            
-            /* モバイル対応 */
-            @media (max-width: 768px) {
-              margin-right: 0.75rem;
-            }
-            
-            .timeline-dot {
-              width: 12px;
-              height: 12px;
-              background-color: #6b7280;
-              border: 2px solid #374151;
-              border-radius: 50%;
-              margin-top: 0.5rem;
-              
-              /* モバイル対応 */
-              @media (max-width: 768px) {
-                width: 10px;
-                height: 10px;
-                margin-top: 0.25rem;
-              }
-            }
-            
-            .timeline-line {
-              position: absolute;
-              left: 50%;
-              top: 20px;
-              transform: translateX(-50%);
-              width: 2px;
-              height: calc(100% + 1.5rem);
-              background-color: #374151;
-              
-              /* モバイル対応 */
-              @media (max-width: 768px) {
-                top: 15px;
-                height: calc(100% + 1rem);
-              }
-            }
-          }
-          
-          .timeline-content {
-            flex: 1;
-            background-color: #2d2d2d;
-            border: 1px solid #404040;
-            border-radius: 8px;
-            padding: 1rem;
-            
-            /* モバイル対応 */
-            @media (max-width: 768px) {
-              padding: 0.75rem;
-              border-radius: 6px;
-            }
-            
-            .update-number {
-              font-size: 0.875rem;
-              color: #10b981;
-              font-weight: 600;
-              margin-bottom: 0.5rem;
-              
-              /* モバイル対応 */
-              @media (max-width: 768px) {
-                font-size: 0.75rem;
-                margin-bottom: 0.25rem;
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    .no-selection {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      
-      .placeholder {
-        text-align: center;
-        color: #a0a0a0;
-        
-        h3 {
-          margin: 0 0 1rem 0;
-          font-size: 1.25rem;
-          font-weight: 500;
-          
-          /* モバイル対応 */
-          @media (max-width: 768px) {
-            font-size: 1.125rem;
-          }
-        }
-        
-        p {
-          margin: 0;
-          font-size: 0.875rem;
-          
-          /* モバイル対応 */
-          @media (max-width: 768px) {
-            font-size: 0.75rem;
-          }
-        }
-      }
-    }
-  }
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 52px;
+  background: #172025;
+  border-bottom: 1px solid #232f35;
+}
+.brand { font-weight: 700; letter-spacing: 0.02em; }
+.grow { flex: 1; }
+.beacon {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #5d6c73; flex: none;
+  &.live { background: #2ed17f; box-shadow: 0 0 0 3px rgba(46, 209, 127, 0.16); }
+}
+.ghost {
+  font: inherit; font-size: 13px; color: #90a0a7;
+  background: transparent; border: 1px solid #35454d;
+  border-radius: 3px; padding: 7px 12px; cursor: pointer; min-height: 34px;
+  &:active { background: #1c262b; }
 }
 
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
+.mapwrap { flex: 1 1 62%; position: relative; min-height: 220px; }
+.map { position: absolute; inset: 0; background: #0b1013; }
+
+.overlay {
+  position: absolute; inset: 0; z-index: 500;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; background: rgba(8, 11, 13, 0.86); color: #90a0a7; font-size: 14px;
+  padding: 20px; text-align: center;
+  &.err { color: #ff93a5; }
+}
+.hint {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 500;
+  background: rgba(8, 11, 13, 0.82); border: 1px solid #232f35;
+  border-radius: 3px; padding: 6px 12px; font-size: 12px; color: #90a0a7;
+  pointer-events: none; max-width: calc(100% - 24px); text-align: center;
+}
+.credit {
+  position: absolute; left: 8px; bottom: 6px; z-index: 500;
+  font-size: 10px; color: #5d6c73; pointer-events: none;
 }
 
-/* スクロールバーのカスタマイズ */
-::-webkit-scrollbar {
-  width: 6px;
-  
-  /* モバイル対応：スクロールバーを細く */
-  @media (max-width: 768px) {
-    width: 4px;
-  }
+.deck {
+  flex: 1 1 40%;
+  display: flex; flex-direction: column;
+  border-top: 1px solid #232f35;
+  background: #12191d;
+  min-height: 0;
+}
+.deck-head {
+  flex: none;
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 9px 14px; border-bottom: 1px solid #232f35;
+  background: #172025; font-size: 14px;
+}
+.dim { color: #90a0a7; font-size: 12px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.deck-body {
+  flex: 1; overflow-y: auto; padding: 10px 14px;
+  display: flex; flex-direction: column; gap: 12px;
 }
 
-::-webkit-scrollbar-track {
-  background: #1a1a1a;
+.warn {
+  margin: 0; padding: 8px 14px;
+  background: #2a2210; color: #f0d68a; font-size: 12px;
+  border-bottom: 1px solid #232f35;
 }
 
-::-webkit-scrollbar-thumb {
-  background: #404040;
-  border-radius: 3px;
+.areablock { display: flex; flex-direction: column; gap: 5px; }
+.areaname { font-size: 12px; color: #90a0a7; letter-spacing: 0.02em; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 警報は「区域 × 種別」で同時に複数出る。四角のブロックで並べると数と種類が一目で掴める */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 10px; border-radius: 3px;
+  font-size: 13px; font-weight: 700; min-height: 34px;
+}
+.cname { white-space: nowrap; }
+.fresh {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 1px 5px; border-radius: 2px; background: rgba(0, 0, 0, 0.28);
+}
+.lv-special { background: #a50021; color: #fff; }
+.lv-warning { background: #ff2800; color: #fff; }
+.lv-advisory { background: #f2e700; color: #241f00; }
+.lv-other { background: #2b373d; color: #c8d3d8; }
+
+.legend {
+  flex: none;
+  display: flex; gap: 14px; flex-wrap: wrap;
+  padding: 8px 14px; border-top: 1px solid #232f35;
+  font-size: 11px; color: #90a0a7;
+  span { display: inline-flex; align-items: center; gap: 5px; }
+  i { width: 9px; height: 9px; border-radius: 2px; }
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #525252;
+.empty { padding: 24px 14px; color: #5d6c73; font-size: 13px; text-align: center; }
+
+/* Leaflet の既定色を画面に合わせる */
+:global(.leaflet-container) { background: #0b1013; outline: none; }
+:global(.leaflet-control-zoom a) {
+  background: #172025; color: #c8d3d8; border-color: #35454d;
+}
+:global(.leaflet-control-zoom a:hover) { background: #22303a; }
+:global(.leaflet-tooltip) {
+  background: #172025; color: #e2e9ec; border: 1px solid #35454d;
+  box-shadow: none; font-size: 12px;
+}
+:global(.leaflet-tooltip-top::before) { border-top-color: #35454d; }
+
+@media (max-width: 680px) {
+  .mapwrap { flex: 1 1 45%; }
+  .deck { flex: 1 1 50%; }
 }
 </style>
