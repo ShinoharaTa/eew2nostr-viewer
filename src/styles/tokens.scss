@@ -1,0 +1,113 @@
+/* =========================================================
+   デザイントークン
+   色は5系統だけ：地 / 文字 / 線 / 選択 / 段階。これ以外の色を足さない。
+   段階の4色は気象庁の配色指針に従う。装飾ではなくデータの符号化なので、
+   見た目の都合で変えない。
+   出典: https://www.jma.go.jp/jma/kishou/info/colorguide/HPColorGuide_202007.pdf
+   ========================================================= */
+:root {
+  /* 地：3段 */
+  --bg-void: #080b0d; /* 最背面。地図の海 */
+  --bg-panel: #12181b; /* パネルの面 */
+  --bg-raise: #1a2226; /* 見出し帯・ホバー */
+
+  /* 文字：3段 */
+  --ink: #e4eaec;
+  --ink-dim: #8f9ca2;
+  --ink-faint: #616e74;
+
+  /* 線：2段 */
+  --line: #232e33;
+  --line-hi: #37454c;
+
+  /* 選択：1色。フォーカスと選択以外に使わない */
+  --accent: #67a9c4;
+
+  /* 段階：4色 */
+  --sev-emergency: #a50021;
+  --sev-warning: #ff2800;
+  --sev-advisory: #f2e700;
+  --sev-info: #7b868c;
+  --on-emergency: #ffffff;
+  --on-warning: #ffffff;
+  --on-advisory: #241f00;
+  --on-info: #ffffff;
+
+  /* 文字：6段。これ以外のサイズを書かない */
+  --t-micro: 10px; /* ラベル・単位・軸 */
+  --t-small: 11.5px; /* 補助情報 */
+  --t-body: 13px; /* 本文・一覧の主行 */
+  --t-lead: 15px; /* パネル見出し */
+  --t-num: 20px; /* 数値（等幅） */
+  --t-hero: 34px; /* 占有表示の主数値 */
+
+  /* 太さ：2つだけ。500/600 を混ぜると輪郭がぼやける */
+  --w-normal: 400;
+  --w-bold: 700;
+
+  --ls-label: 0.12em;
+  --ls-tight: -0.01em;
+
+  /* 余白：4の倍数 */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+
+  /* 45度カット。浮いているものにだけ使う */
+  --notch: 9px;
+  --notch-sm: 5px;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans:
+    -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-void);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--t-body);
+  font-weight: var(--w-normal);
+  line-height: 1.5;
+}
+
+/* 左上と右下を落とす。「浮いている面」の印 */
+.cut {
+  clip-path: polygon(
+    var(--notch) 0,
+    100% 0,
+    100% calc(100% - var(--notch)),
+    calc(100% - var(--notch)) 100%,
+    0 100%,
+    0 var(--notch)
+  );
+}
+.cut-sm {
+  clip-path: polygon(
+    var(--notch-sm) 0,
+    100% 0,
+    100% calc(100% - var(--notch-sm)),
+    calc(100% - var(--notch-sm)) 100%,
+    0 100%,
+    0 var(--notch-sm)
+  );
+}
+
+/* 工事中のシマシマ。彩度が無いので段階の色と混ざらない。
+   面で敷くと文字が読めなくなるため、下端の帯だけに出す */
+.stripe-wip {
+  position: relative;
+}
+.stripe-wip::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background-image: repeating-linear-gradient(45deg, #55666e 0 4px, transparent 4px 8px);
+}
