@@ -1,15 +1,9 @@
 <script lang="ts">
 import { onMount, onDestroy } from "svelte";
 import { browser } from "$app/environment";
-// maplibre-gl は default export を持たないので名前付きで取る
-import {
-  Map as MlMap,
-  LngLatBounds,
-  NavigationControl,
-  type MapMouseEvent,
-  type MapGeoJSONFeature,
-} from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
+import type { Map as LMap, GeoJSON as LGeoJSON, PathOptions, Layer } from "leaflet";
+import type { Feature, MultiPolygon } from "geojson";
+import "leaflet/dist/leaflet.css";
 import {
   fetchAreas,
   fetchClass10Geo,
@@ -17,6 +11,7 @@ import {
   prefectureCodeOf,
   type AreaDict,
   type AreaGeoJson,
+  type AreaFeatureProps,
   type WarningReport,
 } from "$lib/jma/api";
 import { prefectureName } from "$lib/jma/prefectures";
@@ -42,41 +37,76 @@ let failedOffices = $state<string[]>([]);
 let loadingPref = $state(false);
 
 let mapEl: HTMLDivElement;
-let map: MlMap | null = null;
-let geo: AreaGeoJson | null = null;
+let map: LMap | null = null;
+let areaLayer: LGeoJSON | null = null;
+
+// 本土と南西諸島が収まる範囲。南鳥島(154E)や沖ノ鳥島(20.4N)まで含めると
+// 地図が極端に小さくなるため、初期表示からは外す（移動すれば見える）
+const HOME_BOUNDS: [[number, number], [number, number]] = [
+  [24.0, 122.9],
+  [45.7, 146.2],
+];
+
+const BASE_STYLE: PathOptions = {
+  color: "#41545c",
+  weight: 0.6,
+  fillColor: "#1e2a2f",
+  fillOpacity: 1,
+};
+const SELECTED_STYLE: PathOptions = {
+  color: "#7fb2c9",
+  weight: 1.2,
+  fillColor: "#2b3f4d",
+  fillOpacity: 1,
+};
 
 // 選択中の県の、区域ごとの発令内容。□ブロックで並べる元
 const blocks = $derived.by(() => {
-  const out: { areaCode: string; areaName: string; items: { code: string; status: string; level: WarningLevel }[] }[] = [];
+  const out: {
+    areaCode: string;
+    areaName: string;
+    items: { code: string; status: string; level: WarningLevel }[];
+  }[] = [];
   for (const rep of reports) {
     for (const [areaCode, w] of rep.byArea) {
       if (w.active.length === 0) continue;
       const items = w.active
         .map((a) => ({ ...a, level: warningLevel(a.code) }))
         .sort((x, y) => LEVEL_RANK[y.level] - LEVEL_RANK[x.level]);
-      out.push({
-        areaCode,
-        areaName: areas?.class10s[areaCode]?.name ?? areaCode,
-        items,
-      });
+      out.push({ areaCode, areaName: areas?.class10s[areaCode]?.name ?? areaCode, items });
     }
   }
-  // 段階の高い区域を先に出す
-  return out.sort(
-    (a, b) => LEVEL_RANK[b.items[0].level] - LEVEL_RANK[a.items[0].level],
-  );
+  return out.sort((a, b) => LEVEL_RANK[b.items[0].level] - LEVEL_RANK[a.items[0].level]);
 });
 
 const quietAreas = $derived(
-  reports.reduce((n, r) => n + [...r.byArea.values()].filter((w) => w.active.length === 0).length, 0),
+  reports.reduce(
+    (n, r) => n + [...r.byArea.values()].filter((w) => w.active.length === 0).length,
+    0,
+  ),
 );
 
 const reportedAt = $derived(reports[0]?.reportedAt ?? "");
+
+function restyle() {
+  areaLayer?.eachLayer((l: Layer) => {
+    const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> })
+      .feature;
+    if (!f) return;
+    const on = selectedPref !== null && f.properties.prefCode === selectedPref;
+    (l as Layer & { setStyle: (s: PathOptions) => void }).setStyle(
+      on ? SELECTED_STYLE : BASE_STYLE,
+    );
+  });
+}
 
 async function selectPrefecture(prefCode: string) {
   if (!areas) return;
   selectedPref = prefCode;
   selectedName = prefectureName(prefCode);
+  restyle();
+  zoomToPrefecture(prefCode);
+
   loadingPref = true;
   reports = [];
   failedOffices = [];
@@ -91,117 +121,71 @@ async function selectPrefecture(prefCode: string) {
   } finally {
     if (selectedPref === prefCode) loadingPref = false;
   }
-  zoomToPrefecture(prefCode);
 }
 
 function zoomToPrefecture(prefCode: string) {
-  if (!map || !geo) return;
-  const bounds = new LngLatBounds();
-  let hit = false;
-  for (const f of geo.features) {
-    if (prefectureCodeOf(f.properties.code) !== prefCode) continue;
-    for (const poly of f.geometry.coordinates) {
-      for (const ring of poly) {
-        for (const [lng, lat] of ring) {
-          bounds.extend([lng, lat]);
-          hit = true;
-        }
-      }
-    }
-  }
-  if (hit) map.fitBounds(bounds, { padding: 40, duration: 700, maxZoom: 9 });
+  if (!map || !areaLayer) return;
+  let bounds: ReturnType<LGeoJSON["getBounds"]> | null = null;
+  areaLayer.eachLayer((l: Layer) => {
+    const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> })
+      .feature;
+    if (!f || f.properties.prefCode !== prefCode) return;
+    const b = (l as Layer & { getBounds: () => ReturnType<LGeoJSON["getBounds"]> }).getBounds();
+    bounds = bounds ? bounds.extend(b) : b;
+  });
+  if (bounds) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 9 });
 }
 
 function resetView() {
   selectedPref = null;
   reports = [];
   failedOffices = [];
-  map?.fitBounds(
-    [
-      [127.0, 26.0],
-      [146.5, 45.8],
-    ],
-    { padding: 20, duration: 600 },
-  );
-  map?.setFilter("area-selected", ["==", ["get", "prefCode"], "__none__"]);
+  restyle();
+  map?.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
 }
 
 onMount(async () => {
   if (!browser) return;
   try {
-    const [a, g] = await Promise.all([fetchAreas(), fetchClass10Geo()]);
+    // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
+    const [mod, a, g] = await Promise.all([
+      import("leaflet"),
+      fetchAreas(),
+      fetchClass10Geo(),
+    ]);
+    const L = mod.default ?? mod;
     areas = a;
-    geo = g;
 
-    // 予報区コードから都道府県コードを持たせておく。塗り分けと選択に使う
-    for (const f of g.features) {
+    // 予報区コードから都道府県コードを持たせておく。選択に使う
+    for (const f of (g as AreaGeoJson).features) {
       f.properties.prefCode = prefectureCodeOf(f.properties.code);
     }
 
-    const m = new MlMap({
-      container: mapEl,
-      // 背景タイルに依存しない。予報区のポリゴンそのものを白地図として描く
-      style: {
-        version: 8,
-        sources: {},
-        layers: [{ id: "bg", type: "background", paint: { "background-color": "#0b1013" } }],
-      },
-      bounds: [
-        [127.0, 26.0],
-        [146.5, 45.8],
-      ],
-      fitBoundsOptions: { padding: 20 },
+    // 背景タイルは張らない。予報区のポリゴンそのものを白地図として描く
+    const m = L.map(mapEl, {
+      zoomControl: true,
       attributionControl: false,
+      // 予報区の形が正しく読めればよいので、回転や傾きは要らない
+      minZoom: 3,
+      maxZoom: 12,
     });
+    m.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
 
-    m.on("load", () => {
-      if (!geo) return;
-      m.addSource("areas", { type: "geojson", data: geo });
-      m.addLayer({
-        id: "area-fill",
-        type: "fill",
-        source: "areas",
-        paint: { "fill-color": "#1e2a2f", "fill-opacity": 1 },
-      });
-      m.addLayer({
-        id: "area-selected",
-        type: "fill",
-        source: "areas",
-        filter: ["==", ["get", "prefCode"], "__none__"],
-        paint: { "fill-color": "#2b3f4d", "fill-opacity": 1 },
-      });
-      m.addLayer({
-        id: "area-line",
-        type: "line",
-        source: "areas",
-        paint: { "line-color": "#41545c", "line-width": 0.6 },
-      });
-
-      m.on("click", "area-fill", (e: MapMouseEvent & { features?: MapGeoJSONFeature[] }) => {
-        const f = e.features?.[0];
-        if (!f) return;
-        const pref = String(f.properties?.prefCode ?? "");
+    areaLayer = L.geoJSON(g as AreaGeoJson, {
+      style: () => BASE_STYLE,
+      onEachFeature: (feature, layer) => {
+        const pref = (feature.properties as AreaFeatureProps).prefCode;
         if (!pref) return;
-        m.setFilter("area-selected", ["==", ["get", "prefCode"], pref]);
-        void selectPrefecture(pref);
-      });
-      m.on("mouseenter", "area-fill", () => {
-        m.getCanvas().style.cursor = "pointer";
-      });
-      m.on("mouseleave", "area-fill", () => {
-        m.getCanvas().style.cursor = "";
-      });
-
-      m.addControl(new NavigationControl({ showCompass: false }), "bottom-right");
-      phase = "ready";
-    });
-
-    m.on("error", (e) => {
-      errorText = e.error?.message ?? "地図の描画に失敗しました";
-      phase = "error";
-    });
+        layer.on("click", () => void selectPrefecture(pref));
+        layer.bindTooltip((feature.properties as AreaFeatureProps).name, {
+          sticky: true,
+          direction: "top",
+        });
+      },
+    }).addTo(m);
 
     map = m;
+    phase = "ready";
   } catch (e) {
     errorText = e instanceof Error ? e.message : String(e);
     phase = "error";
@@ -211,6 +195,7 @@ onMount(async () => {
 onDestroy(() => {
   map?.remove();
   map = null;
+  areaLayer = null;
 });
 
 function fmtTime(iso: string): string {
@@ -239,7 +224,7 @@ function fmtTime(iso: string): string {
       <div class="overlay"><span>気象庁のデータを取得しています…</span></div>
     {:else if phase === "error"}
       <div class="overlay err">
-        <strong>データを取得できませんでした</strong>
+        <strong>地図を表示できませんでした</strong>
         <span>{errorText}</span>
       </div>
     {/if}
@@ -291,7 +276,9 @@ function fmtTime(iso: string): string {
 
       <div class="legend">
         {#each ["special", "warning", "advisory"] as lv (lv)}
-          <span><i style="background: {LEVEL_COLOR[lv as WarningLevel]}"></i>{LEVEL_LABEL[lv as WarningLevel]}</span>
+          <span>
+            <i style="background: {LEVEL_COLOR[lv as WarningLevel]}"></i>{LEVEL_LABEL[lv as WarningLevel]}
+          </span>
         {/each}
       </div>
     {/if}
@@ -328,29 +315,28 @@ function fmtTime(iso: string): string {
 .ghost {
   font: inherit; font-size: 13px; color: #90a0a7;
   background: transparent; border: 1px solid #35454d;
-  border-radius: 3px; padding: 7px 12px; cursor: pointer;
-  min-height: 34px;
+  border-radius: 3px; padding: 7px 12px; cursor: pointer; min-height: 34px;
   &:active { background: #1c262b; }
 }
 
-.mapwrap { flex: 1 1 55%; position: relative; min-height: 220px; }
-.map { position: absolute; inset: 0; }
+.mapwrap { flex: 1 1 62%; position: relative; min-height: 220px; }
+.map { position: absolute; inset: 0; background: #0b1013; }
 
 .overlay {
-  position: absolute; inset: 0;
+  position: absolute; inset: 0; z-index: 500;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 8px; background: rgba(8, 11, 13, 0.86); color: #90a0a7; font-size: 14px;
   padding: 20px; text-align: center;
   &.err { color: #ff93a5; }
 }
 .hint {
-  position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 500;
   background: rgba(8, 11, 13, 0.82); border: 1px solid #232f35;
   border-radius: 3px; padding: 6px 12px; font-size: 12px; color: #90a0a7;
   pointer-events: none; max-width: calc(100% - 24px); text-align: center;
 }
 .credit {
-  position: absolute; left: 8px; bottom: 6px;
+  position: absolute; left: 8px; bottom: 6px; z-index: 500;
   font-size: 10px; color: #5d6c73; pointer-events: none;
 }
 
@@ -364,14 +350,15 @@ function fmtTime(iso: string): string {
 .deck-head {
   flex: none;
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-  padding: 9px 14px;
-  border-bottom: 1px solid #232f35;
-  background: #172025;
-  font-size: 14px;
+  padding: 9px 14px; border-bottom: 1px solid #232f35;
+  background: #172025; font-size: 14px;
 }
 .dim { color: #90a0a7; font-size: 12px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.deck-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 12px; }
+.deck-body {
+  flex: 1; overflow-y: auto; padding: 10px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+}
 
 .warn {
   margin: 0; padding: 8px 14px;
@@ -386,17 +373,13 @@ function fmtTime(iso: string): string {
 /* 警報は「区域 × 種別」で同時に複数出る。四角のブロックで並べると数と種類が一目で掴める */
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 10px;
-  border-radius: 3px;
-  font-size: 13px; font-weight: 700;
-  min-height: 34px;
-  border: 1px solid transparent;
+  padding: 7px 10px; border-radius: 3px;
+  font-size: 13px; font-weight: 700; min-height: 34px;
 }
 .cname { white-space: nowrap; }
 .fresh {
   font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
-  padding: 1px 5px; border-radius: 2px;
-  background: rgba(0, 0, 0, 0.28);
+  padding: 1px 5px; border-radius: 2px; background: rgba(0, 0, 0, 0.28);
 }
 .lv-special { background: #a50021; color: #fff; }
 .lv-warning { background: #ff2800; color: #fff; }
@@ -412,9 +395,19 @@ function fmtTime(iso: string): string {
   i { width: 9px; height: 9px; border-radius: 2px; }
 }
 
-.empty {
-  padding: 24px 14px; color: #5d6c73; font-size: 13px; text-align: center;
+.empty { padding: 24px 14px; color: #5d6c73; font-size: 13px; text-align: center; }
+
+/* Leaflet の既定色を画面に合わせる */
+:global(.leaflet-container) { background: #0b1013; outline: none; }
+:global(.leaflet-control-zoom a) {
+  background: #172025; color: #c8d3d8; border-color: #35454d;
 }
+:global(.leaflet-control-zoom a:hover) { background: #22303a; }
+:global(.leaflet-tooltip) {
+  background: #172025; color: #e2e9ec; border: 1px solid #35454d;
+  box-shadow: none; font-size: 12px;
+}
+:global(.leaflet-tooltip-top::before) { border-top-color: #35454d; }
 
 @media (max-width: 680px) {
   .mapwrap { flex: 1 1 45%; }
