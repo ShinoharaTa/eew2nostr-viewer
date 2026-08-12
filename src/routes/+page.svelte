@@ -262,12 +262,56 @@ const groups = $derived.by(() => {
   );
 });
 
-const visibleGroups = $derived(
-  selectedPref ? groups.filter((g) => g.prefCode === selectedPref) : groups,
-);
+// 県ごとにまとめる。区域ごとに並べると同じ県名が何度も繰り返され、
+// 実データでは 115行のうち大半がその繰り返しだった。
+// 県でまとめると 40行 ＋ 県に属さないもの、になる
+interface PrefGroup {
+  prefCode: string;
+  prefName: string;
+  top: Severity;
+  itemCount: number;
+  areas: AreaGroup[];
+}
+
+const prefGroups = $derived.by(() => {
+  const by: Record<string, PrefGroup> = {};
+  for (const g of groups) {
+    if (!g.prefCode) continue;
+    const p = by[g.prefCode] ?? (by[g.prefCode] = {
+      prefCode: g.prefCode,
+      prefName: g.prefName ?? g.prefCode,
+      top: g.top,
+      itemCount: 0,
+      areas: [],
+    });
+    p.areas.push(g);
+    p.itemCount += g.items.length;
+    if (SEVERITY_RANK[g.top] > SEVERITY_RANK[p.top]) p.top = g.top;
+  }
+  const list = Object.values(by);
+  for (const p of list) {
+    p.areas.sort(
+      (a, b) => SEVERITY_RANK[b.top] - SEVERITY_RANK[a.top] || a.areaCode.localeCompare(b.areaCode),
+    );
+  }
+  return list.sort(
+    (a, b) => SEVERITY_RANK[b.top] - SEVERITY_RANK[a.top] || a.prefCode.localeCompare(b.prefCode),
+  );
+});
+
+// 都道府県に対応づかないもの。仕様書のとおり震央地名・津波予報区・火山・河川が該当する
+const orphanGroups = $derived(groups.filter((g) => !g.prefCode));
+
+// 折りたたみ。危ないものを隠さないよう、警報以上は既定で開く
+const expanded = $state<Record<string, boolean>>({});
+const isOpen = (p: PrefGroup) =>
+  expanded[p.prefCode] ?? SEVERITY_RANK[p.top] >= SEVERITY_RANK.warning;
+function togglePref(code: string, cur: boolean) {
+  expanded[code] = !cur;
+}
 
 // 地図に面として出せないもの。「地図に無い＝危険が無い」と読まれないよう数を出す
-const offMapCount = $derived(visibleGroups.filter((g) => !g.onMap).length);
+const offMapCount = $derived(groups.filter((g) => !g.onMap).length);
 
 const detailGroup = $derived(groups.find((g) => g.areaCode === selectedArea) ?? null);
 
@@ -532,13 +576,14 @@ const logRows = $derived(
       <!-- 1カラム目：発令中一覧 -->
       <section class="col col-list">
         <div class="col-head">
-          発令中<span class="sp"></span><b>{visibleGroups.length}</b>地域
+          発令中<span class="sp"></span><b>{prefGroups.length}</b>県
+          {#if orphanGroups.length > 0}／<b>{orphanGroups.length}</b>件{/if}
           {#if selectedPref}
             <button class="mini" onclick={resetView}>全国</button>
           {/if}
         </div>
         <div class="col-body">
-          {#if visibleGroups.length === 0}
+          {#if prefGroups.length === 0 && orphanGroups.length === 0}
             <p class="empty">発表中の情報はありません</p>
           {/if}
           {#if offMapCount > 0}
@@ -547,27 +592,73 @@ const logRows = $derived(
               予報区の形を持たないため）。地図に無いことは危険が無いことを意味しません。
             </p>
           {/if}
-          {#each visibleGroups as g (g.areaCode)}
-            <!-- 切迫だけシマシマを敷く。ここでしか使わないので模様が印になる -->
-            <button
-              class="row"
-              class:sel={g.areaCode === selectedArea}
-              class:danger={g.top === "emergency"}
-              onclick={() => pickArea(g.areaCode)}
-            >
-              <i class="bar b-{g.top}"></i>
-              <span class="mid">
-                <span class="ttl">
-                  {#if g.prefName}<em>{g.prefName}</em>{/if}{g.areaName}
-                </span>
-                <span class="sub">
-                  {g.items.map((i) => HAZARD_LABEL[i.hazard]).filter((v, i, a) => a.indexOf(v) === i).join("・")}
-                  ／ {g.items.length}件{#if !g.onMap} ／ {g.areaType}{/if}
-                </span>
-              </span>
-              <span class="tag cut-sm t-{g.top}">{SEVERITY_LABEL[g.top]}</span>
-            </button>
+
+          {#each prefGroups as p (p.prefCode)}
+            {@const open = isOpen(p)}
+            <div class="prefblock">
+              <div class="prefhead" class:danger={p.top === "emergency"}>
+                <button
+                  class="twist"
+                  aria-expanded={open}
+                  aria-label={open ? "閉じる" : "開く"}
+                  onclick={() => togglePref(p.prefCode, open)}
+                >{open ? "▾" : "▸"}</button>
+                <button class="prefname" onclick={() => zoomToPrefecture(p.prefCode)}>
+                  <i class="bar b-{p.top}"></i>
+                  <span class="nm">{p.prefName}</span>
+                  <span class="cnt">{p.areas.length}区域 ／ {p.itemCount}件</span>
+                  <span class="tag cut-sm t-{p.top}">{SEVERITY_LABEL[p.top]}</span>
+                </button>
+              </div>
+
+              {#if open}
+                {#each p.areas as g (g.areaCode)}
+                  <button
+                    class="row sub-row"
+                    class:sel={g.areaCode === selectedArea}
+                    class:danger={g.top === "emergency"}
+                    onclick={() => pickArea(g.areaCode)}
+                  >
+                    <i class="bar b-{g.top}"></i>
+                    <span class="mid">
+                      <span class="ttl">{g.areaName}</span>
+                      <span class="sub">
+                        {g.items.map((i) => i.headline).join(" ／ ")}
+                      </span>
+                    </span>
+                    {#if !g.onMap}<span class="gran">{g.areaType}</span>{/if}
+                  </button>
+                {/each}
+              {/if}
+            </div>
           {/each}
+
+          {#if orphanGroups.length > 0}
+            <div class="orphan-head">
+              県に属さないもの
+              <span class="sp"></span>
+              <b>{orphanGroups.length}</b>件
+            </div>
+            <p class="note">
+              震央地名・津波予報区・火山・河川は都道府県に対応づきません（複数県にまたがる、
+              海域であるなど）。地図に面でも出せません。
+            </p>
+            {#each orphanGroups as g (g.areaCode)}
+              <button
+                class="row"
+                class:sel={g.areaCode === selectedArea}
+                class:danger={g.top === "emergency"}
+                onclick={() => pickArea(g.areaCode)}
+              >
+                <i class="bar b-{g.top}"></i>
+                <span class="mid">
+                  <span class="ttl">{g.areaName}</span>
+                  <span class="sub">{g.items.map((i) => i.headline).join(" ／ ")}</span>
+                </span>
+                <span class="gran">{g.areaType}</span>
+              </button>
+            {/each}
+          {/if}
         </div>
       </section>
 
@@ -960,6 +1051,78 @@ const logRows = $derived(
 }
 .col-body { flex: 1; overflow-y: auto; min-height: 0; }
 
+/* 県の見出し */
+.prefblock { border-bottom: 1px solid var(--line); }
+.prefhead {
+  display: flex;
+  align-items: stretch;
+  background: #161d21;
+  position: relative;
+  /* 切迫だけシマシマ。ここでしか使わないので模様が印になる */
+  &.danger::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.16;
+    background-image: repeating-linear-gradient(45deg, var(--sev-emergency) 0 6px, transparent 6px 12px);
+  }
+}
+.twist {
+  flex: none;
+  width: 26px;
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--ink-faint);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  &:hover { color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+}
+.prefname {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 8px var(--s3) 8px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  &:hover { background: var(--bg-raise); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  i.bar { width: 3px; align-self: stretch; flex: none; }
+  .nm { font-size: var(--t-body); font-weight: var(--w-bold); white-space: nowrap; }
+  .cnt { flex: 1; font-size: var(--t-micro); color: var(--ink-faint); white-space: nowrap; }
+}
+
+.orphan-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 9px var(--s3);
+  margin-top: var(--s2);
+  background: var(--bg-raise);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-micro);
+  letter-spacing: var(--ls-label);
+  color: var(--ink-faint);
+  b { color: var(--ink-dim); letter-spacing: 0; }
+  .sp { flex: 1; }
+}
+
+.gran {
+  align-self: center;
+  flex: none;
+  font-size: var(--t-micro);
+  color: var(--ink-faint);
+}
+
 /* 一覧の行 */
 .row {
   display: flex;
@@ -994,7 +1157,6 @@ const logRows = $derived(
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    em { color: var(--ink-dim); font-style: normal; font-weight: var(--w-normal); margin-right: 5px; }
   }
   .sub {
     font-size: var(--t-small);
@@ -1003,6 +1165,12 @@ const logRows = $derived(
     overflow: hidden;
     text-overflow: ellipsis;
   }
+}
+
+.sub-row {
+  padding-left: 26px;
+  border-bottom-color: #161e22;
+  .ttl { font-weight: var(--w-normal); }
 }
 
 .tag {
