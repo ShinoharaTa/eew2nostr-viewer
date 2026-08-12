@@ -1,7 +1,13 @@
 <script lang="ts">
 import { onMount, onDestroy } from "svelte";
 import { browser } from "$app/environment";
-import type { Map as LMap, GeoJSON as LGeoJSON, PathOptions, Layer } from "leaflet";
+import type {
+  Map as LMap,
+  GeoJSON as LGeoJSON,
+  LayerGroup as LLayerGroup,
+  PathOptions,
+  Layer,
+} from "leaflet";
 import type { Feature, MultiPolygon } from "geojson";
 import "leaflet/dist/leaflet.css";
 import OpsWindow from "$lib/components/OpsWindow.svelte";
@@ -17,6 +23,12 @@ import {
   type WarningReport,
 } from "$lib/jma/api";
 import { prefectureName } from "$lib/jma/prefectures";
+import {
+  HAZARD_TILES,
+  HAZARD_ATTRIBUTION,
+  PATH_MAX_NATIVE_ZOOM,
+  hazardTileUrl,
+} from "$lib/hazard/tiles";
 import {
   LEVEL_COLOR,
   LEVEL_LABEL,
@@ -48,15 +60,30 @@ const HOME_BOUNDS: [[number, number], [number, number]] = [
   [45.7, 146.2],
 ];
 
-// 気象警報だけが実装済み。他は取得経路の用意ができ次第つなぐ
+// 気象警報とハザードマップが実装済み。他は取得経路の用意ができ次第つなぐ
 const LAYERS = [
-  { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true },
-  { id: "quake", label: "地震", color: "#67a9c4", ready: false },
-  { id: "volcano", label: "火山", color: "#d0913f", ready: false },
-  { id: "typhoon", label: "台風", color: "#dde5e8", ready: false },
-  { id: "hazard", label: "ハザードマップ", color: "#8d6bb5", ready: false },
+  { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true, hazard: false },
+  { id: "quake", label: "地震", color: "#67a9c4", ready: false, hazard: false },
+  { id: "volcano", label: "火山", color: "#d0913f", ready: false, hazard: false },
+  { id: "typhoon", label: "台風", color: "#dde5e8", ready: false, hazard: false },
+  ...HAZARD_TILES.map((h) => ({
+    id: h.id,
+    label: h.label,
+    color: h.color,
+    ready: true,
+    hazard: true,
+  })),
 ];
 let layerOn = $state<Record<string, boolean>>({ warning: true });
+let mapZoom = $state(5);
+
+const hazardOn = $derived(HAZARD_TILES.some((h) => layerOn[h.id]));
+// ハザードマップは広域では読めず、通信量だけかかるので一定の拡大から出す
+const hazardMinZoom = Math.min(...HAZARD_TILES.map((h) => h.minZoom));
+const hazardTooWide = $derived(hazardOn && mapZoom < hazardMinZoom);
+// タイルが実際に描かれているときだけ白地図の塗りを透かす。
+// 広域では透かしても下に何も無く、地図が消えるだけになる
+const hazardActive = $derived(hazardOn && mapZoom >= hazardMinZoom);
 
 // 位置と大きさはここで保持する。OpsWindow が直接書き換えるので、
 // 閉じて開き直しても動かした位置が残る
@@ -164,7 +191,9 @@ function styleOf(props: AreaFeatureProps): PathOptions {
     color: isSel ? "#cfe6f2" : inPref ? "#7fb2c9" : BASE.color,
     weight: isSel ? 1.8 : inPref ? 1.1 : BASE.weight,
     fillColor: lv ? LEVEL_COLOR[lv] : BASE.fillColor,
-    fillOpacity: lv ? (lv === "advisory" ? 0.55 : 0.72) : 1,
+    // ハザードマップを出しているときは、下のラスタが見えるよう塗りを薄くする。
+    // 警報の色は残したいので、発表なしの区域だけ完全に透かす
+    fillOpacity: hazardActive ? (lv ? 0.3 : 0) : lv ? (lv === "advisory" ? 0.55 : 0.72) : 1,
   };
 }
 
@@ -204,8 +233,38 @@ function resetView() {
   map?.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
 }
 
+// ハザードマップのタイル。切り替えのたびに作り直さず、一度作って付け外しする
+const hazardLayers: Record<string, LLayerGroup> = {};
+
+function buildHazardLayers(L: typeof import("leaflet")) {
+  for (const h of HAZARD_TILES) {
+    const group = L.layerGroup(
+      h.paths.map((path) =>
+        L.tileLayer(hazardTileUrl(path), {
+          // 種別ごとに実在する上限ズームが違う。超えたぶんは引き伸ばす。
+          // 指定しないと 404 になり、拡大した瞬間にレイヤーが消えて
+          // 「危険が無い」と読まれてしまう
+          maxNativeZoom: PATH_MAX_NATIVE_ZOOM[path] ?? h.maxNativeZoom,
+          minZoom: h.minZoom,
+          maxZoom: 18,
+          opacity: 0.75,
+          crossOrigin: true,
+        }),
+      ),
+    );
+    hazardLayers[h.id] = group;
+  }
+}
+
 function toggleLayer(id: string) {
-  layerOn = { ...layerOn, [id]: !layerOn[id] };
+  const on = !layerOn[id];
+  layerOn = { ...layerOn, [id]: on };
+
+  const group = hazardLayers[id];
+  if (group && map) {
+    if (on) group.addTo(map);
+    else map.removeLayer(group);
+  }
   restyle();
 }
 
@@ -230,7 +289,33 @@ onMount(async () => {
       maxZoom: 12,
     });
     L.control.zoom({ position: "bottomright" }).addTo(m);
-    m.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
+
+    // URL で初期状態を指定できる。地点とレイヤーを他人に渡せるようにするため。
+    //   ?center=35.72,139.80&zoom=12&layer=flood,sediment
+    const q = new URLSearchParams(location.search);
+    const center = q.get("center")?.split(",").map(Number);
+    const zoom = Number(q.get("zoom"));
+    if (center?.length === 2 && center.every(Number.isFinite) && Number.isFinite(zoom)) {
+      m.setView([center[0], center[1]], zoom);
+    } else {
+      m.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
+    }
+    const wanted = q.get("layer")?.split(",").filter(Boolean) ?? [];
+    if (wanted.length > 0) {
+      layerOn = { warning: layerOn.warning, ...Object.fromEntries(wanted.map((k) => [k, true])) };
+    }
+    mapZoom = m.getZoom();
+    m.on("zoomend", () => {
+      mapZoom = m.getZoom();
+      // 透かすかどうかがズームで変わるので塗り直す
+      if (hazardOn) restyle();
+    });
+
+    buildHazardLayers(L);
+    // URL で指定されたハザードレイヤーを反映する
+    for (const h of HAZARD_TILES) {
+      if (layerOn[h.id]) hazardLayers[h.id]?.addTo(m);
+    }
 
     areaLayer = L.geoJSON(g as AreaGeoJson, {
       style: (f) => styleOf(f?.properties as AreaFeatureProps),
@@ -311,7 +396,10 @@ const DOCK: [WinId, string][] = [
   </header>
 
   <nav class="layers" aria-label="レイヤー">
-    {#each LAYERS as l (l.id)}
+    {#each LAYERS as l, i (l.id)}
+      {#if l.hazard && !LAYERS[i - 1]?.hazard}
+        <span class="sep" aria-hidden="true"></span>
+      {/if}
       <button
         class="lyr"
         class:on={layerOn[l.id]}
@@ -322,8 +410,6 @@ const DOCK: [WinId, string][] = [
         <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未</span>{/if}
       </button>
     {/each}
-    <span class="grow"></span>
-    <span class="credit">出典: 気象庁</span>
   </nav>
 
   <div class="stage">
@@ -335,6 +421,12 @@ const DOCK: [WinId, string][] = [
       <div class="overlay err">
         <strong>地図を表示できませんでした</strong><span>{errorText}</span>
       </div>
+    {/if}
+
+    {#if hazardTooWide}
+      <p class="hintbar">
+        ハザードマップはこの広さでは表示されません。拡大すると出ます。
+      </p>
     {/if}
 
     {#if failedOffices.length > 0}
@@ -438,6 +530,10 @@ const DOCK: [WinId, string][] = [
         </button>
       {/each}
     </div>
+
+    <p class="credit">
+      出典: 気象庁{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
+    </p>
 
     <div class="legend">
       {#each ["special", "warning", "advisory"] as lv (lv)}
@@ -559,10 +655,29 @@ const DOCK: [WinId, string][] = [
   &:focus-visible { outline: 2px solid #67a9c4; outline-offset: 2px; }
 }
 .soon { font-size: 9px; padding: 0 4px; border-radius: 2px; background: #2b373d; color: #8d9aa0; }
-.credit { font-size: 10px; color: #5d6c73; white-space: nowrap; }
+.sep { flex: none; width: 1px; align-self: stretch; margin: 0 4px; background: #2a373d; }
+.credit {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 800;
+  margin: 0;
+  font-size: 10px;
+  color: #6d7c83;
+  white-space: nowrap;
+  pointer-events: none;
+}
 
 .stage { flex: 1; position: relative; min-height: 0; }
-.map { position: absolute; inset: 0; background: #0b1013; }
+.map {
+  position: absolute;
+  inset: 0;
+  background: #0b1013;
+  /* Leaflet の内部ペインは z-index 200〜700 を使う。ここで重なり文脈を作らないと
+     タイルやポリゴンがウインドウ（z-index 10〜）より前に出てしまう */
+  z-index: 0;
+}
 
 .overlay {
   position: absolute;
@@ -577,6 +692,20 @@ const DOCK: [WinId, string][] = [
   color: #90a0a7;
   font-size: 14px;
   &.err { color: #ff93a5; }
+}
+.hintbar {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  z-index: 800;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 3px;
+  background: #14222a;
+  color: #9fc2d2;
+  font-size: 12px;
+  border: 1px solid #2b4552;
 }
 .failbar {
   position: absolute;
