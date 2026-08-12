@@ -19,6 +19,12 @@ import {
 } from "$lib/jma/api";
 import { subscribeBosaiStatus, type BosaiSubscription } from "$lib/bosai/client";
 import {
+  WORKSPACES,
+  detectSituation,
+  focusTargets,
+  type Situation,
+} from "$lib/ops/workspaces";
+import {
   isActive,
   prefectureCodeOfArea,
   topSeverityByArea,
@@ -100,6 +106,62 @@ const geom = $state({
 let openWins = $state<WinId[]>(["detail", "log"]);
 let zOrder = $state<WinId[]>(["detail", "log", "filter"]);
 let sidePos = $state<SidePos>("left");
+
+// ---- 状況別ワークスペース ----
+let situation = $state<Situation>("normal");
+// 直前に人が触っていたら自動で切り替えない。読んでいる途中で画面を奪わないため
+let lastTouch = $state(0);
+let pending = $state<Situation | null>(null);
+const HOLD_MS = 30_000;
+
+function applyWorkspace(id: Situation, moveMap = true) {
+  const def = WORKSPACES.find((w) => w.id === id);
+  if (!def) return;
+  situation = id;
+  pending = null;
+
+  // レイヤーは定義にあるものだけを入れる
+  const next: Record<string, boolean> = {};
+  for (const l of LAYERS) next[l.id] = l.ready && def.layers.includes(l.id);
+  for (const k of Object.keys(layerOn)) if (!(k in next)) next[k] = false;
+  layerOn = next;
+  for (const h of HAZARD_TILES) {
+    const on = next[h.id];
+    const group = hazardLayers[h.id];
+    if (!group || !map) continue;
+    if (on) group.addTo(map);
+    else map.removeLayer(group);
+  }
+
+  openWins = def.windows.filter((w): w is WinId =>
+    w === "detail" || w === "log" || w === "filter",
+  );
+
+  if (moveMap) {
+    const targets = focusTargets(def, active);
+    const head = targets.find((t) => t.area && prefectureCodeOfArea(t.area));
+    if (head?.area) {
+      const pref = prefectureCodeOfArea(head.area);
+      if (pref) zoomToPrefecture(pref);
+    } else if (!def.focus) {
+      map?.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
+    }
+  }
+  restyle();
+}
+
+function pickWorkspace(id: Situation) {
+  lastTouch = Date.now();
+  applyWorkspace(id);
+}
+
+// 状況が変わったら切り替える。ただし直前まで操作していたら帯を出すに留める
+function considerSwitch() {
+  const detected = detectSituation(statuses);
+  if (detected === situation) { pending = null; return; }
+  if (Date.now() - lastTouch > HOLD_MS) applyWorkspace(detected);
+  else pending = detected;
+}
 // 段階のフィルター。地図と一覧の両方に効く
 const sevOn = $state<Record<Severity, boolean>>({
   emergency: true, warning: true, advisory: true, info: false,
@@ -347,6 +409,7 @@ onMount(async () => {
       if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       stalled = false;
       restyle();
+      considerSwitch();
     });
     stallTimer = setTimeout(() => { if (received === 0) stalled = true; }, 12000);
   } catch (e) {
@@ -388,10 +451,18 @@ const logRows = $derived(
 
 <svelte:head><title>防災ダッシュボード</title></svelte:head>
 
+<svelte:window onpointerdown={() => (lastTouch = Date.now())} onkeydown={() => (lastTouch = Date.now())} />
+
 <div class="console">
   <header class="bar">
     <span class="beacon" class:live={phase === "ready"}></span>
     <span class="brand">防災オペレーション</span>
+    <div class="wsw">
+      <b>状況</b>
+      {#each WORKSPACES as w (w.id)}
+        <button class:on={situation === w.id} onclick={() => pickWorkspace(w.id)}>{w.label}</button>
+      {/each}
+    </div>
     <div class="counts">
       <div class="cnt">
         <b style="color: {SEVERITY_COLOR.emergency}">{counts.emergency}</b><span>切迫</span>
@@ -489,6 +560,14 @@ const logRows = $derived(
       {:else if phase === "error"}
         <div class="overlay err">
           <strong>地図を表示できませんでした</strong><span>{errorText}</span>
+        </div>
+      {/if}
+
+      {#if pending}
+        <div class="switchbar cut-sm">
+          <span>{WORKSPACES.find((w) => w.id === pending)?.label}の配置に切り替えますか</span>
+          <button onclick={() => applyWorkspace(pending!)}>切り替える</button>
+          <button class="ghosty" onclick={() => (pending = null)}>いいえ</button>
         </div>
       {/if}
 
@@ -662,6 +741,60 @@ const logRows = $derived(
   }
   span { font-size: var(--t-micro); letter-spacing: var(--ls-label); color: var(--ink-faint); }
 }
+.wsw {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0 var(--s3);
+  border-right: 1px solid var(--line);
+  b {
+    font-size: var(--t-micro);
+    letter-spacing: var(--ls-label);
+    color: var(--ink-faint);
+    font-weight: var(--w-bold);
+    margin-right: var(--s1);
+  }
+  button {
+    font: inherit;
+    font-size: var(--t-body);
+    padding: 6px 12px;
+    color: var(--ink-dim);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    &.on { background: #22303a; color: var(--ink); font-weight: var(--w-bold); }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  }
+}
+
+/* 自動切り替えを保留したときの提案。読んでいる途中で画面を奪わないため */
+.switchbar {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  z-index: 850;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 7px var(--s3);
+  background: #14222a;
+  border: 1px solid #2b4552;
+  color: #9fc2d2;
+  font-size: var(--t-small);
+  button {
+    font: inherit;
+    font-size: var(--t-small);
+    color: var(--bg-void);
+    background: var(--ink);
+    border: none;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-weight: var(--w-bold);
+    &.ghosty { background: transparent; color: var(--ink-dim); border: 1px solid var(--line-hi); font-weight: var(--w-normal); }
+  }
+}
+
 .sidesw {
   display: flex;
   align-self: center;
