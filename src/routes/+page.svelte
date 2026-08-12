@@ -45,7 +45,7 @@ import {
 } from "$lib/hazard/tiles";
 
 type Phase = "loading" | "ready" | "error";
-type WinId = "detail" | "log" | "filter";
+type WinId = "filter";
 type SidePos = "left" | "right" | "hidden";
 
 let phase = $state<Phase>("loading");
@@ -98,14 +98,37 @@ const hazardActive = $derived(hazardOn && mapZoom >= hazardMinZoom);
 // 位置と大きさはここで保持する。OpsWindow が直接書き換えるので、
 // 閉じて開き直しても動かした位置が残る
 // 座標は地図領域からの相対。サイドバーが左右どちらでも同じ扱いになる
+// 常に要るもの（一覧・詳細・発表ログ）は固定のカラムに置く。
+// ウィンドウは「常には要らないもの」だけにする
 const geom = $state({
-  detail: { x: 24, y: 58, w: 340, h: 400 },
-  log: { x: 24, y: 476, w: 340, h: 300 },
-  filter: { x: 380, y: 58, w: 250, h: 180 },
+  filter: { x: 24, y: 58, w: 250, h: 190 },
 });
-let openWins = $state<WinId[]>(["detail", "log"]);
-let zOrder = $state<WinId[]>(["detail", "log", "filter"]);
+let openWins = $state<WinId[]>([]);
+let zOrder = $state<WinId[]>(["filter"]);
 let sidePos = $state<SidePos>("left");
+
+// ---- ニュース ----
+// 配信元が CORS を開けていないので、サーバ側の中継 (/api/news) 経由で取る
+interface NewsItem { title: string; link: string; publishedAt: string; }
+let news = $state<NewsItem[]>([]);
+let newsSource = $state("");
+let newsError = $state("");
+let newsTimer: ReturnType<typeof setInterval> | null = null;
+
+async function loadNews() {
+  try {
+    const res = await fetch("/api/news");
+    const data = (await res.json()) as {
+      source: string; items: NewsItem[]; error?: string;
+    };
+    newsSource = data.source ?? "";
+    if (data.error) { newsError = data.error; return; }
+    news = data.items ?? [];
+    newsError = "";
+  } catch (e) {
+    newsError = e instanceof Error ? e.message : String(e);
+  }
+}
 
 // ---- 状況別ワークスペース ----
 let situation = $state<Situation>("normal");
@@ -132,10 +155,6 @@ function applyWorkspace(id: Situation, moveMap = true) {
     if (on) group.addTo(map);
     else map.removeLayer(group);
   }
-
-  openWins = def.windows.filter((w): w is WinId =>
-    w === "detail" || w === "log" || w === "filter",
-  );
 
   if (moveMap) {
     const targets = focusTargets(def, active);
@@ -280,8 +299,6 @@ function pickArea(areaCode: string) {
   selectedArea = areaCode;
   const g = groups.find((x) => x.areaCode === areaCode);
   selectedPref = g?.prefCode ?? prefectureCodeOf(areaCode);
-  if (!openWins.includes("detail")) toggleWin("detail");
-  else focusWin("detail");
   restyle();
   zoomToPrefecture(selectedPref);
 }
@@ -412,6 +429,9 @@ onMount(async () => {
       considerSwitch();
     });
     stallTimer = setTimeout(() => { if (received === 0) stalled = true; }, 12000);
+
+    void loadNews();
+    newsTimer = setInterval(() => void loadNews(), 5 * 60 * 1000);
   } catch (e) {
     errorText = e instanceof Error ? e.message : String(e);
     phase = "error";
@@ -420,6 +440,7 @@ onMount(async () => {
 
 onDestroy(() => {
   if (stallTimer) clearTimeout(stallTimer);
+  if (newsTimer) clearInterval(newsTimer);
   bosaiSub?.close();
   bosaiSub = null;
   map?.remove();
@@ -434,11 +455,7 @@ function fmtStamp(iso: string): string {
   return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-const DOCK: [WinId, string][] = [
-  ["detail", "詳細"],
-  ["log", "発表ログ"],
-  ["filter", "フィルター"],
-];
+const DOCK: [WinId, string][] = [["filter", "フィルター"]];
 
 // 発表ログ。addressable event は履歴を残さないので、
 // いま存在するものを発表順に並べるところまでしかできない
@@ -511,173 +528,192 @@ const logRows = $derived(
   </nav>
 
   <div class="body">
-    <aside class="side" class:right={sidePos === "right"} class:hidden={sidePos === "hidden"}>
-      <div class="side-head">
-        発令中<span class="sp"></span><b>{visibleGroups.length}</b>地域
-        {#if selectedPref}
-          <button class="mini" onclick={resetView}>全国</button>
-        {/if}
-      </div>
-      <div class="side-body">
-        {#if visibleGroups.length === 0}
-          <p class="empty">発表中の情報はありません</p>
-        {/if}
-        {#if offMapCount > 0}
-          <p class="note">
-            {offMapCount} 地域は地図に面で出せません（土砂災害は市町村、地震は震央地名など、
-            予報区の形を持たないため）。地図に無いことは危険が無いことを意味しません。
-          </p>
-        {/if}
-        {#each visibleGroups as g (g.areaCode)}
-          <!-- 切迫だけシマシマを敷く。ここでしか使わないので模様が印になる -->
-          <button
-            class="row"
-            class:sel={g.areaCode === selectedArea}
-            class:danger={g.top === "emergency"}
-            onclick={() => pickArea(g.areaCode)}
-          >
-            <i class="bar b-{g.top}"></i>
-            <span class="mid">
-              <span class="ttl">
-                {#if g.prefName}<em>{g.prefName}</em>{/if}{g.areaName}
-              </span>
-              <span class="sub">
-                {g.items.map((i) => HAZARD_LABEL[i.hazard]).filter((v, i, a) => a.indexOf(v) === i).join("・")}
-                ／ {g.items.length}件{#if !g.onMap} ／ {g.areaType}{/if}
-              </span>
-            </span>
-            <span class="tag cut-sm t-{g.top}">{SEVERITY_LABEL[g.top]}</span>
-          </button>
-        {/each}
-      </div>
-    </aside>
-
-    <div class="stage">
-      <div class="map" bind:this={mapEl}></div>
-
-      {#if phase === "loading"}
-        <div class="overlay"><span>気象庁のデータを取得しています…</span></div>
-      {:else if phase === "error"}
-        <div class="overlay err">
-          <strong>地図を表示できませんでした</strong><span>{errorText}</span>
-        </div>
-      {/if}
-
-      {#if pending}
-        <div class="switchbar cut-sm">
-          <span>{WORKSPACES.find((w) => w.id === pending)?.label}の配置に切り替えますか</span>
-          <button onclick={() => applyWorkspace(pending!)}>切り替える</button>
-          <button class="ghosty" onclick={() => (pending = null)}>いいえ</button>
-        </div>
-      {/if}
-
-      {#if hazardTooWide}
-        <p class="hintbar cut-sm">ハザードマップはこの広さでは表示されません。拡大すると出ます。</p>
-      {/if}
-
-      {#if phase === "ready" && openWins.includes("detail")}
-        <OpsWindow
-          title="詳細"
-          sub={detailGroup?.prefName ?? detailGroup?.areaType ?? ""}
-          geom={geom.detail}
-          z={zOf("detail")}
-          focused={zOrder.at(-1) === "detail"}
-          onfocus={() => focusWin("detail")}
-          onclose={() => toggleWin("detail")}
-        >
-          {#if !detailGroup}
-            <p class="empty">一覧から地域を選んでください</p>
-          {:else}
-            <div class="detail">
-              <div class="place">{detailGroup.areaName}</div>
-              <div class="meta mono">
-                {detailGroup.prefName ?? "—"} ／ {detailGroup.areaType} ／ {detailGroup.areaCode}
-              </div>
-              <div class="k">発表中</div>
-              <!-- 同じ地域に複数の情報が同時に出る。ブロックで並べると数と種類が一目で掴める -->
-              <div class="chips">
-                {#each detailGroup.items as it (it.key)}
-                  <span class="chip cut-sm t-{it.severity}">{it.headline}</span>
-                {/each}
-              </div>
-              <div class="k">発表時刻</div>
-              <div class="times">
-                {#each detailGroup.items as it (it.key)}
-                  <div><span>{fmtStamp(it.publishedAt)}</span>{it.headline}</div>
-                {/each}
-              </div>
-            </div>
+    <div class="cols" class:right={sidePos === "right"} class:hidden={sidePos === "hidden"}>
+      <!-- 1カラム目：発令中一覧 -->
+      <section class="col col-list">
+        <div class="col-head">
+          発令中<span class="sp"></span><b>{visibleGroups.length}</b>地域
+          {#if selectedPref}
+            <button class="mini" onclick={resetView}>全国</button>
           {/if}
-        </OpsWindow>
-      {/if}
-
-      {#if phase === "ready" && openWins.includes("log")}
-        <OpsWindow
-          title="発表ログ"
-          sub="{logRows.length}件"
-          geom={geom.log}
-          z={zOf("log")}
-          focused={zOrder.at(-1) === "log"}
-          onfocus={() => focusWin("log")}
-          onclose={() => toggleWin("log")}
-        >
-          <p class="note">
-            addressable event は履歴を残さないため、いま発表中のものを発表順に並べています。
-            解除済みのものは残りません。
-          </p>
-          {#each logRows as r (r.key)}
-            <button class="logrow" onclick={() => r.area && pickArea(r.area.code)}>
-              <span class="tm mono">{fmtStamp(r.publishedAt)}</span>
-              <i class="bar b-{r.severity}"></i>
-              <span class="c">
-                <span class="h">{r.headline}</span>
-                <span class="w">{HAZARD_LABEL[r.hazard]}{#if r.area} ／ {r.area.name}{/if}</span>
+        </div>
+        <div class="col-body">
+          {#if visibleGroups.length === 0}
+            <p class="empty">発表中の情報はありません</p>
+          {/if}
+          {#if offMapCount > 0}
+            <p class="note">
+              {offMapCount} 地域は地図に面で出せません（土砂災害は市町村、地震は震央地名など、
+              予報区の形を持たないため）。地図に無いことは危険が無いことを意味しません。
+            </p>
+          {/if}
+          {#each visibleGroups as g (g.areaCode)}
+            <!-- 切迫だけシマシマを敷く。ここでしか使わないので模様が印になる -->
+            <button
+              class="row"
+              class:sel={g.areaCode === selectedArea}
+              class:danger={g.top === "emergency"}
+              onclick={() => pickArea(g.areaCode)}
+            >
+              <i class="bar b-{g.top}"></i>
+              <span class="mid">
+                <span class="ttl">
+                  {#if g.prefName}<em>{g.prefName}</em>{/if}{g.areaName}
+                </span>
+                <span class="sub">
+                  {g.items.map((i) => HAZARD_LABEL[i.hazard]).filter((v, i, a) => a.indexOf(v) === i).join("・")}
+                  ／ {g.items.length}件{#if !g.onMap} ／ {g.areaType}{/if}
+                </span>
               </span>
+              <span class="tag cut-sm t-{g.top}">{SEVERITY_LABEL[g.top]}</span>
             </button>
           {/each}
-        </OpsWindow>
-      {/if}
+        </div>
+      </section>
 
-      {#if phase === "ready" && openWins.includes("filter")}
-        <OpsWindow
-          title="フィルター"
-          geom={geom.filter}
-          z={zOf("filter")}
-          focused={zOrder.at(-1) === "filter"}
-          onfocus={() => focusWin("filter")}
-          onclose={() => toggleWin("filter")}
-        >
-          <div class="filters">
-            {#each ["emergency", "warning", "advisory", "info"] as sv (sv)}
-              <label class="fchk">
-                <input type="checkbox" bind:checked={sevOn[sv as Severity]} onchange={restyle} />
-                <i style="background: {SEVERITY_COLOR[sv as Severity]}"></i>
-                {SEVERITY_LABEL[sv as Severity]}
-              </label>
-            {/each}
+      <!-- 2カラム目：詳細（上）と発表ログ（下） -->
+      <section class="col col-side">
+        <div class="pane pane-detail">
+          <div class="col-head">
+            詳細<span class="sp"></span>
+            {#if detailGroup}<b>{detailGroup.prefName ?? detailGroup.areaType}</b>{/if}
           </div>
-        </OpsWindow>
-      {/if}
+          <div class="col-body">
+            {#if !detailGroup}
+              <p class="empty">一覧から地域を選んでください</p>
+            {:else}
+              <div class="detail">
+                <div class="place">{detailGroup.areaName}</div>
+                <div class="meta mono">
+                  {detailGroup.prefName ?? "—"} ／ {detailGroup.areaType} ／ {detailGroup.areaCode}
+                </div>
+                <div class="k">発表中</div>
+                <!-- 同じ地域に複数の情報が同時に出る。ブロックで並べると数と種類が一目で掴める -->
+                <div class="chips">
+                  {#each detailGroup.items as it (it.key)}
+                    <span class="chip cut-sm t-{it.severity}">{it.headline}</span>
+                  {/each}
+                </div>
+                <div class="k">発表時刻</div>
+                <div class="times">
+                  {#each detailGroup.items as it (it.key)}
+                    <div><span>{fmtStamp(it.publishedAt)}</span>{it.headline}</div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
 
-      <div class="dock">
-        {#each DOCK as [id, label] (id)}
-          <button class="cut-sm" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
-            {label}
-          </button>
-        {/each}
+        <div class="pane pane-log">
+          <div class="col-head">発表ログ<span class="sp"></span><b>{logRows.length}</b>件</div>
+          <div class="col-body">
+            {#each logRows as r (r.key)}
+              <button class="logrow" onclick={() => r.area && pickArea(r.area.code)}>
+                <span class="tm mono">{fmtStamp(r.publishedAt)}</span>
+                <i class="bar b-{r.severity}"></i>
+                <span class="c">
+                  <span class="h">{r.headline}</span>
+                  <span class="w">{HAZARD_LABEL[r.hazard]}{#if r.area} ／ {r.area.name}{/if}</span>
+                </span>
+              </button>
+            {/each}
+            {#if logRows.length === 0}
+              <p class="empty">受信待ち</p>
+            {/if}
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 地図とニュース -->
+    <div class="main">
+      <div class="stage">
+        <div class="map" bind:this={mapEl}></div>
+
+        {#if phase === "loading"}
+          <div class="overlay"><span>気象庁のデータを取得しています…</span></div>
+        {:else if phase === "error"}
+          <div class="overlay err">
+            <strong>地図を表示できませんでした</strong><span>{errorText}</span>
+          </div>
+        {/if}
+
+        {#if pending}
+          <div class="switchbar cut-sm">
+            <span>{WORKSPACES.find((w) => w.id === pending)?.label}の配置に切り替えますか</span>
+            <button onclick={() => applyWorkspace(pending!)}>切り替える</button>
+            <button class="ghosty" onclick={() => (pending = null)}>いいえ</button>
+          </div>
+        {/if}
+
+        {#if hazardTooWide}
+          <p class="hintbar cut-sm">ハザードマップはこの広さでは表示されません。拡大すると出ます。</p>
+        {/if}
+
+        {#if phase === "ready" && openWins.includes("filter")}
+          <OpsWindow
+            title="フィルター"
+            geom={geom.filter}
+            z={zOf("filter")}
+            focused={zOrder.at(-1) === "filter"}
+            onfocus={() => focusWin("filter")}
+            onclose={() => toggleWin("filter")}
+          >
+            <div class="filters">
+              {#each ["emergency", "warning", "advisory", "info"] as sv (sv)}
+                <label class="fchk">
+                  <input type="checkbox" bind:checked={sevOn[sv as Severity]} onchange={restyle} />
+                  <i style="background: {SEVERITY_COLOR[sv as Severity]}"></i>
+                  {SEVERITY_LABEL[sv as Severity]}
+                </label>
+              {/each}
+            </div>
+          </OpsWindow>
+        {/if}
+
+        <div class="dock">
+          {#each DOCK as [id, label] (id)}
+            <button class="cut-sm" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
+              {label}
+            </button>
+          {/each}
+        </div>
+
+        <p class="credit">
+          出典: 気象庁（eew2nostr 経由）{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
+        </p>
+
+        <div class="legend">
+          {#each ["emergency", "warning", "advisory"] as lv (lv)}
+            <span>
+              <i style="background: {SEVERITY_COLOR[lv as Severity]}"></i>{SEVERITY_LABEL[lv as Severity]}
+            </span>
+          {/each}
+        </div>
       </div>
 
-      <p class="credit">
-        出典: 気象庁（eew2nostr 経由）{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
-      </p>
-
-      <div class="legend">
-        {#each ["emergency", "warning", "advisory"] as lv (lv)}
-          <span>
-            <i style="background: {SEVERITY_COLOR[lv as Severity]}"></i>{SEVERITY_LABEL[lv as Severity]}
-          </span>
-        {/each}
-      </div>
+      <!-- 地図の下。横に伸びるので見出しが読める形にする -->
+      <section class="news">
+        <div class="col-head">
+          ニュース<span class="sp"></span>
+          {#if newsSource}<b>{newsSource}</b>{/if}
+        </div>
+        <div class="news-body">
+          {#if newsError}
+            <p class="empty">ニュースを取得できませんでした（{newsError}）</p>
+          {:else if news.length === 0}
+            <p class="empty">取得中…</p>
+          {:else}
+            {#each news as n (n.link)}
+              <a class="newsitem" href={n.link} target="_blank" rel="external noopener noreferrer">
+                <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
+                <span class="ttl">{n.title}</span>
+              </a>
+            {/each}
+          {/if}
+        </div>
+      </section>
     </div>
   </div>
 </div>
@@ -872,18 +908,33 @@ const logRows = $derived(
 /* ---------- 本体 ---------- */
 .body { flex: 1; display: flex; min-height: 0; }
 
-/* サイドバーは画面端に接するので45度カットしない。固定と浮動を形で区別する */
-.side {
+/* 常に要るものは固定のカラムに置く。画面端に接するので45度カットしない。
+   固定と浮動を形で区別する */
+.cols {
   flex: none;
-  width: 360px;
   display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border-right: 1px solid var(--line);
-  &.right { order: 2; border-right: none; border-left: 1px solid var(--line); }
+  min-height: 0;
+  &.right { order: 2; }
   &.hidden { display: none; }
 }
-.side-head {
+.col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line);
+}
+.cols.right .col:last-child { border-right: none; }
+.cols.right .col:first-child { border-left: 1px solid var(--line); }
+.col-list { width: 340px; }
+.col-side { width: 320px; }
+
+.pane { display: flex; flex-direction: column; min-height: 0; }
+/* 詳細は内容が短いことが多いので、余りは発表ログに回す */
+.pane-detail { flex: 0 1 auto; max-height: 46%; border-bottom: 1px solid var(--line); }
+.pane-log { flex: 1 1 auto; }
+
+.col-head {
   flex: none;
   display: flex;
   align-items: center;
@@ -907,8 +958,9 @@ const logRows = $derived(
   padding: 3px 8px;
   cursor: pointer;
 }
-.side-body { flex: 1; overflow-y: auto; }
+.col-body { flex: 1; overflow-y: auto; min-height: 0; }
 
+/* 一覧の行 */
 .row {
   display: flex;
   width: 100%;
@@ -968,6 +1020,48 @@ const logRows = $derived(
 .t-warning { background: var(--sev-warning); color: var(--on-warning); }
 .t-advisory { background: var(--sev-advisory); color: var(--on-advisory); }
 .t-info { background: var(--sev-info); color: var(--on-info); }
+
+/* 地図とニュースを縦に積む */
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+.news {
+  flex: none;
+  height: 168px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line);
+}
+.news-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  /* 横に伸びる場所なので、見出しが読める幅で折り返す */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(430px, 1fr));
+  align-content: start;
+}
+.newsitem {
+  display: flex;
+  gap: var(--s2);
+  align-items: baseline;
+  padding: 7px var(--s3);
+  border-bottom: 1px solid #1c2529;
+  border-right: 1px solid #1c2529;
+  color: inherit;
+  text-decoration: none;
+  &:hover { background: var(--bg-raise); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tm { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
+  .ttl {
+    font-size: var(--t-small);
+    color: var(--ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  &:hover .ttl { color: var(--ink); }
+}
 
 /* ---------- 地図 ---------- */
 .stage { flex: 1; position: relative; min-width: 0; }
