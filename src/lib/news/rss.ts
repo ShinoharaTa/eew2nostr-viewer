@@ -2,11 +2,13 @@
 //
 // このファイルは意図的に import を持たない。Node から直接読んでテストできるようにするため。
 // 汎用の XML パーサは入れていない。読むのは配信元が決まった RSS 2.0 だけで、
-// 必要なのは title / link / pubDate の3つしかないため。
+// 必要なのは title / link / description / pubDate の4つしかないため。
 
 export interface NewsItem {
   title: string;
   link: string;
+  /** 記事の要約。画面内で読めるようにするため持つ。無ければ空文字 */
+  description: string;
   /** ISO 8601。読めなければ空文字 */
   publishedAt: string;
 }
@@ -59,6 +61,8 @@ export function parseRss(xml: string, limit = 20): NewsItem[] {
     items.push({
       title,
       link,
+      // description に HTML を入れてくる配信元があるので、タグは落として文だけ残す
+      description: pick(block, "description").replace(/<[^>]+>/g, "").trim(),
       publishedAt: toIso(pick(block, "pubDate") || pick(block, "dc:date")),
     });
     if (items.length >= limit) break;

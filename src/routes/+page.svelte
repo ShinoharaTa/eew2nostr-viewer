@@ -111,11 +111,14 @@ let sidePos = $state<SidePos>("left");
 
 // ---- ニュース ----
 // 配信元が CORS を開けていないので、サーバ側の中継 (/api/news) 経由で取る
-interface NewsItem { title: string; link: string; publishedAt: string; }
+interface NewsItem { title: string; link: string; description: string; publishedAt: string; }
 let news = $state<NewsItem[]>([]);
 let newsSource = $state("");
 let newsError = $state("");
 let newsTimer: ReturnType<typeof setInterval> | null = null;
+// 開いているニュース。外部タブに飛ばすだけだと画面内で中身を読む手段が無いため、
+// 行を押したらその場で要約を開く。記事へのリンクは開いた中に置く
+let openNews = $state<string | null>(null);
 
 async function loadNews() {
   try {
@@ -799,7 +802,8 @@ const logRows = $derived(
           <div class="col-head">発表ログ<span class="sp"></span><b>{logRows.length}</b>件</div>
           <div class="col-body">
             {#each logRows as r (r.key)}
-              <button class="logrow" onclick={() => r.area && pickArea(r.area.code)}>
+              <!-- 区域を持たない発表は押しても飛び先が無い。押せる見た目にしない -->
+              <button class="logrow" disabled={!r.area} onclick={() => r.area && pickArea(r.area.code)}>
                 <span class="tm mono">{fmtStamp(r.publishedAt)}</span>
                 <i class="bar b-{r.severity}"></i>
                 <span class="c">
@@ -896,10 +900,24 @@ const logRows = $derived(
             <p class="empty">取得中…</p>
           {:else}
             {#each news as n (n.link)}
-              <a class="newsitem" href={n.link} target="_blank" rel="external noopener noreferrer">
-                <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
-                <span class="ttl">{n.title}</span>
-              </a>
+              <div class="newsitem" class:open={openNews === n.link}>
+                <button
+                  class="news-line"
+                  aria-expanded={openNews === n.link}
+                  onclick={() => (openNews = openNews === n.link ? null : n.link)}
+                >
+                  <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
+                  <span class="ttl">{n.title}</span>
+                </button>
+                {#if openNews === n.link}
+                  <div class="news-detail">
+                    {#if n.description}<p>{n.description}</p>{/if}
+                    <a href={n.link} target="_blank" rel="external noopener noreferrer">
+                      記事を開く ↗
+                    </a>
+                  </div>
+                {/if}
+              </div>
             {/each}
           {/if}
         </div>
@@ -1172,8 +1190,9 @@ const logRows = $derived(
 .col-side { width: 320px; }
 
 .pane { display: flex; flex-direction: column; min-height: 0; }
-/* 詳細は内容が短いことが多いので、余りは発表ログに回す */
-.pane-detail { flex: 0 1 auto; max-height: 46%; border-bottom: 1px solid var(--line); }
+/* 高さは固定する。内容の量に合わせると、地域を選ぶたびに
+   発表ログとの境界が跳ねて、読んでいる行を見失う */
+.pane-detail { flex: 0 0 46%; border-bottom: 1px solid var(--line); }
 .pane-log { flex: 1 1 auto; }
 
 .col-head {
@@ -1355,20 +1374,32 @@ const logRows = $derived(
   flex: 1;
   overflow-y: auto;
   min-height: 0;
-  /* 横に伸びる場所なので、見出しが読める幅で折り返す */
+  /* 横に伸びる場所なので、見出しが読める幅で折り返す。
+     地図側が 430px より狭くなることがあるので min() で頭打ちにする。
+     固定値のままだと右端が画面の外に欠ける */
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(430px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(430px, 100%), 1fr));
   align-content: start;
 }
 .newsitem {
   display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid #1c2529;
+  border-right: 1px solid #1c2529;
+  &.open { background: #10171b; }
+}
+.news-line {
+  display: flex;
   gap: var(--s2);
   align-items: baseline;
   padding: 7px var(--s3);
-  border-bottom: 1px solid #1c2529;
-  border-right: 1px solid #1c2529;
+  border: none;
+  background: transparent;
   color: inherit;
-  text-decoration: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
   &:hover { background: var(--bg-raise); }
   &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .tm { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
@@ -1380,6 +1411,18 @@ const logRows = $derived(
     text-overflow: ellipsis;
   }
   &:hover .ttl { color: var(--ink); }
+}
+.newsitem.open .news-line .ttl { color: var(--ink); white-space: normal; }
+.news-detail {
+  padding: 0 var(--s3) var(--s2);
+  font-size: var(--t-small);
+  p { margin: 0 0 var(--s1); color: var(--ink-dim); line-height: 1.6; }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+    &:hover { text-decoration: underline; }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  }
 }
 
 /* ---------- 地図 ---------- */
@@ -1441,15 +1484,16 @@ const logRows = $derived(
 
 .credit {
   position: absolute;
-  left: 50%;
+  left: var(--s3);
   bottom: 12px;
-  transform: translateX(-50%);
   z-index: 800;
   margin: 0;
   font-size: var(--t-micro);
   color: var(--ink-faint);
   white-space: nowrap;
   pointer-events: none;
+  /* 中央寄せにすると、地図が狭いときに右の凡例と重なる。
+     左下（フィルターの下）に寄せておけばどの幅でもぶつからない */
 }
 
 .legend {
@@ -1509,6 +1553,9 @@ const logRows = $derived(
   cursor: pointer;
   align-items: stretch;
   &:hover { background: var(--bg-raise); }
+  /* 情報として無効なわけではないので色は落とさない。押せないだけ */
+  &:disabled { cursor: default; }
+  &:disabled:hover { background: transparent; }
   .tm { font-family: var(--mono); font-size: var(--t-micro); color: var(--ink-faint); flex: none; width: 76px; }
   i.bar { width: 3px; flex: none; }
   .c { flex: 1; min-width: 0; display: flex; flex-direction: column; }
