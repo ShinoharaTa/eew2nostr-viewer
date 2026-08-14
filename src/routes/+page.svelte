@@ -18,6 +18,8 @@ import {
   type AreaFeatureProps,
 } from "$lib/jma/api";
 import { subscribeBosaiStatus, type BosaiSubscription } from "$lib/bosai/client";
+import { subscribeEew, type EewSubscription } from "$lib/eew/client";
+import { latestPerEvent, shouldTakeOver, type EewReport } from "$lib/eew/eew";
 import {
   WORKSPACES,
   detectSituation,
@@ -73,7 +75,7 @@ const HOME_BOUNDS: [[number, number], [number, number]] = [
 // 気象警報とハザードマップが実装済み。他は取得経路の用意ができ次第つなぐ
 const LAYERS = [
   { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true, hazard: false },
-  { id: "quake", label: "地震", color: "#67a9c4", ready: false, hazard: false },
+  { id: "quake", label: "地震", color: "#67a9c4", ready: true, hazard: false },
   { id: "volcano", label: "火山", color: "#d0913f", ready: false, hazard: false },
   { id: "typhoon", label: "台風", color: "#dde5e8", ready: false, hazard: false },
   ...HAZARD_TILES.map((h) => ({
@@ -130,6 +132,53 @@ async function loadNews() {
   }
 }
 
+// ---- 緊急地震速報 ----
+// 警報・注意報は 30830（分類済み）で取るが、緊急地震速報は kind 7078 の生電文を直接取る。
+// 分類を通る前なので早く、報数・深さ・規模・震源の座標が付いてくる。
+// 30830 側にも hazard: "eew" が流れてくるので、一覧と発表ログはそちらが担う。
+// ここが受け持つのは「画面を覆って知らせること」と「震源を地図に置くこと」の2つ。
+let eewReports = $state<EewReport[]>([]);
+let eewSub: EewSubscription | null = null;
+let dismissedEventId = $state<string | null>(null);
+// 発生からの経過で占有を降ろすため、時計を進める
+let now = $state(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+
+// 占有表示の動作確認用。?eew=demo で偽の速報を1件差し込む。
+//
+// 占有するのは震度5弱以上に限っているので、実データでは滅多に出ない
+// （直近400件・72地震を確認したが1件も該当しなかった）。
+// 出ない表示は壊れていても気付けないため、確認できる経路を残す。
+// 本物と取り違えられないよう、画面に確認用である旨を必ず出す。
+let demo = $state(false);
+
+const DEMO_REPORT: EewReport = {
+  eventId: "demo",
+  serial: 4,
+  originTime: "",
+  isWarning: true,
+  isCanceled: false,
+  isLastInfo: false,
+  hypocenter: "動作確認用（実際の地震ではありません）",
+  coordinate: { lat: 35.7, lon: 139.8 },
+  depthKm: 40,
+  magnitude: 6.8,
+  maxIntRaw: "6-",
+  maxIntLabel: "6弱",
+  maxIntRank: 7,
+};
+
+const quakes = $derived(latestPerEvent(eewReports));
+
+// 画面を覆うのは警報か震度5弱以上の予報だけ。
+// 予報はよく流れる（実データでは24時間で35地震ぶん）ので、
+// 全部で覆うと本当に危ないときに無視されるようになる
+const takeover = $derived(
+  demo && dismissedEventId !== "demo"
+    ? { ...DEMO_REPORT, originTime: new Date(now).toISOString() }
+    : (quakes.find((q) => q.eventId !== dismissedEventId && shouldTakeOver(q, now)) ?? null),
+);
+
 // ---- 状況別ワークスペース ----
 let situation = $state<Situation>("normal");
 // 直前に人が触っていたら自動で切り替えない。読んでいる途中で画面を奪わないため
@@ -155,6 +204,7 @@ function applyWorkspace(id: Situation, moveMap = true) {
     if (on) group.addTo(map);
     else map.removeLayer(group);
   }
+  redrawQuakes();
 
   if (moveMap) {
     const targets = focusTargets(def, active);
@@ -331,6 +381,34 @@ function styleOf(props: AreaFeatureProps): PathOptions {
   };
 }
 
+// 震源のマーカー。地震レイヤーの実体。
+// 30830 の地震は震央地名なので予報区の面を持たず、区域の塗りでは出せない。
+// 座標を持っているのは 7078 のほうだけ
+let quakeLayer: LLayerGroup | null = null;
+let leaflet: typeof import("leaflet") | null = null;
+
+function redrawQuakes() {
+  if (!map || !leaflet || !quakeLayer) return;
+  quakeLayer.clearLayers();
+  if (!layerOn.quake) return;
+  for (const q of quakes.slice(0, 20)) {
+    if (!q.coordinate) continue;
+    const strong = q.maxIntRank >= 5;
+    const color = strong ? SEVERITY_COLOR.warning : "#67a9c4";
+    const marker = leaflet.circleMarker([q.coordinate.lat, q.coordinate.lon], {
+      radius: 4 + Math.max(0, q.maxIntRank) * 1.1,
+      color,
+      weight: 1.4,
+      fillColor: color,
+      fillOpacity: 0.25,
+    });
+    marker.bindTooltip(`${q.hypocenter}／震度${q.maxIntLabel}／M${q.magnitude ?? "-"}`, {
+      direction: "top",
+    });
+    quakeLayer.addLayer(marker);
+  }
+}
+
 function restyle() {
   areaLayer?.eachLayer((l: Layer) => {
     const f = (l as Layer & { feature?: Feature<MultiPolygon, AreaFeatureProps> }).feature;
@@ -398,6 +476,7 @@ function toggleLayer(id: string) {
     if (on) group.addTo(map);
     else map.removeLayer(group);
   }
+  if (id === "quake") redrawQuakes();
   restyle();
 }
 
@@ -409,6 +488,7 @@ onMount(async () => {
     // 取るのは地図のポリゴンだけ
     const [mod, g] = await Promise.all([import("leaflet"), fetchClass10Geo()]);
     const L = mod.default ?? mod;
+    leaflet = L;
 
     for (const f of (g as AreaGeoJson).features) {
       f.properties.prefCode = prefectureCodeOf(f.properties.code);
@@ -434,6 +514,7 @@ onMount(async () => {
     } else {
       m.fitBounds(HOME_BOUNDS, { padding: [2, 2] });
     }
+    demo = q.get("eew") === "demo";
     const wanted = q.get("layer")?.split(",").filter(Boolean) ?? [];
     if (wanted.length > 0) {
       layerOn = { warning: layerOn.warning, ...Object.fromEntries(wanted.map((k) => [k, true])) };
@@ -445,6 +526,7 @@ onMount(async () => {
       if (hazardOn) restyle();
     });
 
+    quakeLayer = L.layerGroup().addTo(m);
     buildHazardLayers(L);
     // URL で指定されたハザードレイヤーを反映する
     for (const h of HAZARD_TILES) {
@@ -474,6 +556,13 @@ onMount(async () => {
     });
     stallTimer = setTimeout(() => { if (received === 0) stalled = true; }, 12000);
 
+    // 緊急地震速報は別系統。分類を通る前の生電文を直接取る
+    eewSub = await subscribeEew((r) => {
+      eewReports = [...eewReports, r];
+      redrawQuakes();
+    });
+    nowTimer = setInterval(() => (now = Date.now()), 5000);
+
     void loadNews();
     newsTimer = setInterval(() => void loadNews(), 5 * 60 * 1000);
   } catch (e) {
@@ -485,11 +574,15 @@ onMount(async () => {
 onDestroy(() => {
   if (stallTimer) clearTimeout(stallTimer);
   if (newsTimer) clearInterval(newsTimer);
+  if (nowTimer) clearInterval(nowTimer);
   bosaiSub?.close();
   bosaiSub = null;
+  eewSub?.close();
+  eewSub = null;
   map?.remove();
   map = null;
   areaLayer = null;
+  quakeLayer = null;
 });
 
 function fmtStamp(iso: string): string {
@@ -500,6 +593,12 @@ function fmtStamp(iso: string): string {
 }
 
 const DOCK: [WinId, string][] = [["filter", "フィルター"]];
+
+function onKey(e: KeyboardEvent) {
+  lastTouch = Date.now();
+  // 占有表示は画面を全部覆うので、閉じる手段をボタン以外にも用意する
+  if (e.key === "Escape" && takeover) dismissedEventId = takeover.eventId;
+}
 
 // 発表ログ。addressable event は履歴を残さないので、
 // いま存在するものを発表順に並べるところまでしかできない
@@ -512,7 +611,7 @@ const logRows = $derived(
 
 <svelte:head><title>防災ダッシュボード</title></svelte:head>
 
-<svelte:window onpointerdown={() => (lastTouch = Date.now())} onkeydown={() => (lastTouch = Date.now())} />
+<svelte:window onpointerdown={() => (lastTouch = Date.now())} onkeydown={onKey} />
 
 <div class="console">
   <header class="bar">
@@ -807,6 +906,58 @@ const logRows = $derived(
       </section>
     </div>
   </div>
+
+  {#if takeover}
+    <!-- 警報と震度5弱以上の予報だけ画面を覆う。
+         カラムもウィンドウも全部隠して、これ以外を読ませない -->
+    <div class="tk" role="alert">
+      <div class="tk-tape" aria-hidden="true"></div>
+      {#if demo}
+        <p class="tk-demo">これは動作確認用の表示です。実際の地震ではありません。</p>
+      {/if}
+      <div class="tk-head">
+        <span class="tk-badge cut-sm">
+          緊急地震速報（{takeover.isWarning ? "警報" : "予報"}）
+        </span>
+        <span class="tk-serial mono">
+          第{takeover.serial}報{takeover.isLastInfo ? "（最終）" : ""}
+        </span>
+        <span class="grow"></span>
+        <button class="tk-close cut-sm" onclick={() => (dismissedEventId = takeover.eventId)}>
+          閉じる
+        </button>
+      </div>
+
+      <!-- 真ん中に寄せて縦に積む。横に並べると 1920 では
+           震源と数値が 1500px 離れ、目が往復することになる -->
+      <div class="tk-body">
+        <div class="tk-int">
+          <span class="tk-label">最大震度</span>
+          <span class="tk-mega">{takeover.maxIntLabel}</span>
+        </div>
+
+        <div class="tk-place">
+          <span class="tk-label">震源</span>
+          <strong>{takeover.hypocenter}</strong>
+        </div>
+
+        <div class="tk-facts mono">
+          <span><b>M{takeover.magnitude ?? "-"}</b></span>
+          <span>深さ <b>{takeover.depthKm ?? "-"}</b>km</span>
+          <span>{fmtStamp(takeover.originTime)} 発生</span>
+          {#if takeover.coordinate}
+            <span class="tk-coord">{takeover.coordinate.lat}N {takeover.coordinate.lon}E</span>
+          {/if}
+        </div>
+      </div>
+
+      <p class="tk-foot">
+        強い揺れに備えてください。
+        <span class="tk-note">発生から3分で自動的に閉じます。</span>
+      </p>
+      <div class="tk-tape" aria-hidden="true"></div>
+    </div>
+  {/if}
 </div>
 
 <style lang="scss">
@@ -1374,6 +1525,140 @@ const logRows = $derived(
   color: var(--ink-dim);
   cursor: pointer;
   i { width: 9px; height: 9px; flex: none; }
+}
+
+/* ---------- 緊急地震速報の占有表示 ---------- */
+/* 地図だけでなく画面全体を覆う。カラムを読ませないためにここまでやる。
+   段階の色は気象庁の配色をそのまま使う。ここで別の赤を作らない */
+.tk {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  display: flex;
+  flex-direction: column;
+  /* 地の黒に段階の赤をわずかに寄せる。真っ黒だと通常の画面と見分けが付かない */
+  background: color-mix(in srgb, var(--sev-emergency) 12%, var(--bg-void));
+}
+/* 工事帯と同じ45度のシマシマ。上下で挟んで「ここは通常の画面ではない」と示す */
+.tk-tape {
+  flex: none;
+  height: 10px;
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--sev-emergency) 0 10px,
+    var(--bg-void) 10px 20px
+  );
+}
+.tk-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--line-hi);
+}
+.tk-badge {
+  background: var(--sev-emergency);
+  color: var(--on-emergency);
+  font-weight: var(--w-bold);
+  font-size: var(--t-lead);
+  letter-spacing: var(--ls-tight);
+  padding: var(--s2) var(--s4);
+}
+.tk-serial { color: var(--ink-dim); font-size: var(--t-small); }
+.tk-close {
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--ink);
+  background: var(--bg-raise);
+  border: 1px solid var(--line-hi);
+  padding: var(--s2) var(--s4);
+  cursor: pointer;
+  min-height: 36px;
+  &:hover { background: var(--line); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+.tk-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: var(--s4);
+  padding: var(--s4) var(--s5);
+  min-height: 0;
+}
+.tk-int { display: flex; flex-direction: column; align-items: center; gap: var(--s1); }
+/* この画面で最初に読む数字。他をすべて従える大きさにする */
+.tk-mega {
+  font-size: var(--t-mega);
+  font-weight: var(--w-bold);
+  line-height: 1;
+  letter-spacing: var(--ls-tight);
+  color: var(--sev-warning);
+  font-variant-numeric: tabular-nums;
+}
+.tk-place {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  strong {
+    font-size: var(--t-hero);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--ls-tight);
+    line-height: 1.15;
+    text-wrap: balance;
+    /* 見出し自身の文字サイズを基準にする。親の em で指定すると
+       本文サイズ基準になり、震源名が数文字で折り返す */
+    max-width: 16em;
+  }
+}
+.tk-label {
+  font-size: var(--t-micro);
+  letter-spacing: var(--ls-label);
+  color: var(--ink-dim);
+}
+.tk-facts {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  font-size: var(--t-body);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  b { font-size: var(--t-num); font-weight: var(--w-bold); color: var(--ink); }
+}
+.tk-coord { color: var(--ink-faint); }
+.tk-foot {
+  flex: none;
+  margin: 0;
+  padding: var(--s3) var(--s5) var(--s4);
+  font-size: var(--t-body);
+  color: var(--ink);
+  text-align: center;
+  border-top: 1px solid var(--line-hi);
+}
+.tk-note { color: var(--ink-faint); font-size: var(--t-small); margin-left: var(--s2); }
+/* 本物と取り違えられないよう、確認用のときは必ず最上部に出す */
+.tk-demo {
+  flex: none;
+  margin: 0;
+  padding: var(--s2) var(--s5);
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--line-hi);
+  color: var(--ink-dim);
+  font-size: var(--t-small);
+  letter-spacing: var(--ls-label);
+}
+
+@media (max-width: 700px) {
+  .tk-head { padding: var(--s3) var(--s4); gap: var(--s2); }
+  .tk-body { gap: var(--s3); padding: var(--s4) var(--s3); }
+  .tk-foot { padding: var(--s3) var(--s4); }
 }
 
 :global(.leaflet-container) { background: var(--bg-void); outline: none; }
