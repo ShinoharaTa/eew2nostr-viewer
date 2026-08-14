@@ -29,8 +29,9 @@ export const WORKSPACES: WorkspaceDef[] = [
   {
     id: "rain",
     label: "大雨",
-    // 大雨のときは浸水想定と土砂の区域を重ねる
-    layers: ["warning", "flood", "sediment"],
+    // 浸水想定と土砂の区域は別カテゴリ（ハザードマップモード）に分けたので
+    // ここでは重ねない。発令情報に静的な参照情報を混ぜない
+    layers: ["warning"],
     windows: ["detail", "log"],
     focus: { hazards: ["weather", "sediment", "flood"], minSeverity: "warning" },
   },
