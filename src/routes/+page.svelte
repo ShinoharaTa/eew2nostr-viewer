@@ -47,7 +47,10 @@ import {
 } from "$lib/hazard/tiles";
 
 type Phase = "loading" | "ready" | "error";
-type WinId = "filter" | "detail" | "news";
+type WinId = "filter" | "detail" | "log";
+// 発令情報（いま起きていること）とハザードマップ（備えの参照情報）は
+// 性質が違うので、同じ地図を土台にカテゴリごと出し分ける
+type Mode = "alert" | "hazard";
 
 let phase = $state<Phase>("loading");
 let errorText = $state("");
@@ -83,24 +86,33 @@ const HOME_BOUNDS: [[number, number], [number, number]] = [
   [45.7, 146.2],
 ];
 
-// 気象警報とハザードマップが実装済み。他は取得経路の用意ができ次第つなぐ
-const LAYERS = [
-  { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true, hazard: false },
-  { id: "quake", label: "地震", color: "#67a9c4", ready: true, hazard: false },
-  { id: "volcano", label: "火山", color: "#d0913f", ready: false, hazard: false },
-  { id: "typhoon", label: "台風", color: "#dde5e8", ready: false, hazard: false },
-  ...HAZARD_TILES.map((h) => ({
-    id: h.id,
-    label: h.label,
-    color: h.color,
-    ready: true,
-    hazard: true,
-  })),
+// 発令カテゴリのレイヤー。ハザードマップのタイルは別カテゴリ（mode）で扱う
+const ALERT_LAYERS = [
+  { id: "warning", label: "警報・注意報", color: "#ff2800", ready: true },
+  { id: "quake", label: "地震", color: "#67a9c4", ready: true },
+  { id: "volcano", label: "火山", color: "#d0913f", ready: false },
+  { id: "typhoon", label: "台風", color: "#dde5e8", ready: false },
 ];
 let layerOn = $state<Record<string, boolean>>({ warning: true });
 let mapZoom = $state(5);
+let mode = $state<Mode>("alert");
 
-const hazardOn = $derived(HAZARD_TILES.some((h) => layerOn[h.id]));
+function switchMode(m: Mode) {
+  if (m === mode) return;
+  mode = m;
+  lastTouch = Date.now();
+  // タイルはハザードモードでだけ地図に載せる。トグルの状態自体は残す
+  for (const h of HAZARD_TILES) {
+    const g = hazardLayers[h.id];
+    if (!g || !map) continue;
+    if (m === "hazard" && layerOn[h.id]) g.addTo(map);
+    else map.removeLayer(g);
+  }
+  redrawQuakes();
+  restyle();
+}
+
+const hazardOn = $derived(mode === "hazard" && HAZARD_TILES.some((h) => layerOn[h.id]));
 // ハザードマップは広域では読めず、通信量だけかかるので一定の拡大から出す
 const hazardMinZoom = Math.min(...HAZARD_TILES.map((h) => h.minZoom));
 const hazardTooWide = $derived(hazardOn && mapZoom < hazardMinZoom);
@@ -110,18 +122,16 @@ const hazardActive = $derived(hazardOn && mapZoom >= hazardMinZoom);
 
 // 位置と大きさはここで保持する。OpsWindow が直接書き換えるので、
 // 閉じて開き直しても動かした位置が残る。座標は地図領域からの相対。
-// 常に要るもの（都道府県別の一覧・発表ログ）は固定のカラムに置き、
-// 見たいときだけ見るもの（詳細・ニュース・フィルター）はウインドウにする。
-// 詳細とニュースの初期位置は地図の大きさが分かってから決め直す
+// 常に要るもの（都道府県別の一覧・ニュース）は固定の枠に置き、
+// 見たいときだけ見るもの（詳細・発表ログ・フィルター）はウインドウにする。
+// 詳細と発表ログの初期位置は地図の大きさが分かってから決め直す
 const geom = $state({
   filter: { x: 180, y: 10, w: 250, h: 190 },
   detail: { x: 24, y: 10, w: 320, h: 340 },
-  news: { x: 24, y: 10, w: 560, h: 200 },
+  log: { x: 24, y: 10, w: 340, h: 380 },
 });
-let openWins = $state<WinId[]>(["news"]);
-let zOrder = $state<WinId[]>(["filter", "detail", "news"]);
-// 一覧（左）と詳細+ログ（右）をまとめて隠して、地図だけにできる
-let panelsOn = $state(true);
+let openWins = $state<WinId[]>([]);
+let zOrder = $state<WinId[]>(["filter", "detail", "log"]);
 
 // ---- ニュース ----
 // 配信元が CORS を開けていないので、サーバ側の中継 (/api/news) 経由で取る
@@ -130,8 +140,16 @@ let news = $state<NewsItem[]>([]);
 let newsSource = $state("");
 let newsError = $state("");
 let newsTimer: ReturnType<typeof setInterval> | null = null;
-// 開いているニュース。ウインドウ内でその場に要約を開く
-let openNews = $state<string | null>(null);
+// 詳細ウインドウは地域とニュースで使い回す。どちらを表示中か
+let detailKind = $state<"area" | "news">("area");
+let newsSel = $state<NewsItem | null>(null);
+
+function pickNews(n: NewsItem) {
+  newsSel = n;
+  detailKind = "news";
+  if (!openWins.includes("detail")) openWins = [...openWins, "detail"];
+  focusWin("detail");
+}
 
 async function loadNews() {
   try {
@@ -208,18 +226,10 @@ function applyWorkspace(id: Situation, moveMap = true) {
   situation = id;
   pending = null;
 
-  // レイヤーは定義にあるものだけを入れる
-  const next: Record<string, boolean> = {};
-  for (const l of LAYERS) next[l.id] = l.ready && def.layers.includes(l.id);
-  for (const k of Object.keys(layerOn)) if (!(k in next)) next[k] = false;
+  // 発令カテゴリのレイヤーだけを触る。ハザードタイルのトグルは別カテゴリの持ち物
+  const next: Record<string, boolean> = { ...layerOn };
+  for (const l of ALERT_LAYERS) next[l.id] = l.ready && def.layers.includes(l.id);
   layerOn = next;
-  for (const h of HAZARD_TILES) {
-    const on = next[h.id];
-    const group = hazardLayers[h.id];
-    if (!group || !map) continue;
-    if (on) group.addTo(map);
-    else map.removeLayer(group);
-  }
   redrawQuakes();
 
   if (moveMap) {
@@ -240,11 +250,12 @@ function pickWorkspace(id: Situation) {
   applyWorkspace(id);
 }
 
-// 状況が変わったら切り替える。ただし直前まで操作していたら帯を出すに留める
+// 状況が変わったら切り替える。ただし直前まで操作していたら帯を出すに留める。
+// ハザードマップを読んでいる最中にも配置を奪わない（発令モードでだけ自動適用）
 function considerSwitch() {
   const detected = detectSituation(statuses);
   if (detected === situation) { pending = null; return; }
-  if (Date.now() - lastTouch > HOLD_MS) applyWorkspace(detected);
+  if (mode === "alert" && Date.now() - lastTouch > HOLD_MS) applyWorkspace(detected);
   else pending = detected;
 }
 // 段階のフィルター。地図と一覧の両方に効く
@@ -385,7 +396,8 @@ const detailGroup = $derived(groups.find((g) => g.areaCode === selectedArea) ?? 
 const BASE: PathOptions = { color: "#41545c", weight: 0.55, fillColor: "#1e2a2f", fillOpacity: 1 };
 
 function styleOf(props: AreaFeatureProps): PathOptions {
-  const lv = layerOn.warning ? areaSeverity.get(props.code) : undefined;
+  // 段階の塗りは発令モードだけ。ハザードモードでは白地図に戻してタイルを主役にする
+  const lv = mode === "alert" && layerOn.warning ? areaSeverity.get(props.code) : undefined;
   const inPref = props.prefCode === selectedPref;
   const isSel = props.code === selectedArea;
   return {
@@ -407,7 +419,7 @@ let leaflet: typeof import("leaflet") | null = null;
 function redrawQuakes() {
   if (!map || !leaflet || !quakeLayer) return;
   quakeLayer.clearLayers();
-  if (!layerOn.quake) return;
+  if (!layerOn.quake || mode !== "alert") return;
   for (const q of quakes.slice(0, 20)) {
     if (!q.coordinate) continue;
     const strong = q.maxIntRank >= 5;
@@ -439,6 +451,7 @@ function pickArea(areaCode: string) {
   const g = groups.find((x) => x.areaCode === areaCode);
   selectedPref = g?.prefCode ?? prefectureCodeOf(areaCode);
   // 詳細はウインドウ。選んだら開いて前面に出す
+  detailKind = "area";
   if (!openWins.includes("detail")) openWins = [...openWins, "detail"];
   focusWin("detail");
   restyle();
@@ -538,6 +551,8 @@ onMount(async () => {
     const wanted = q.get("layer")?.split(",").filter(Boolean) ?? [];
     if (wanted.length > 0) {
       layerOn = { warning: layerOn.warning, ...Object.fromEntries(wanted.map((k) => [k, true])) };
+      // ハザードタイルを URL で指定されたら、そのカテゴリから始める
+      if (wanted.some((k) => HAZARD_TILES.some((h) => h.id === k))) mode = "hazard";
     }
     mapZoom = m.getZoom();
     m.on("zoomend", () => {
@@ -548,9 +563,9 @@ onMount(async () => {
 
     quakeLayer = L.layerGroup().addTo(m);
     buildHazardLayers(L);
-    // URL で指定されたハザードレイヤーを反映する
+    // URL で指定されたハザードレイヤーを反映する（ハザードモードのときだけ載る）
     for (const h of HAZARD_TILES) {
-      if (layerOn[h.id]) hazardLayers[h.id]?.addTo(m);
+      if (mode === "hazard" && layerOn[h.id]) hazardLayers[h.id]?.addTo(m);
     }
 
     areaLayer = L.geoJSON(g as AreaGeoJson, {
@@ -566,11 +581,11 @@ onMount(async () => {
     phase = "ready";
 
     // ウインドウの初期位置は地図の大きさが分かってから決める。
-    // ニュースは地図の下部、詳細は右上。動かした位置はそのまま残る
+    // 詳細は右上、発表ログはその下。動かした位置はそのまま残る
     const sw = mapEl.clientWidth;
     const sh = mapEl.clientHeight;
-    geom.news = { x: 24, y: Math.max(10, sh - 300), w: Math.min(640, sw - 48), h: 210 };
     geom.detail = { x: Math.max(24, sw - 344), y: 10, w: 320, h: 340 };
+    geom.log = { x: Math.max(24, sw - 364), y: 360, w: 340, h: Math.max(240, sh - 420) };
 
     // 防災ステータスを購読する。気象庁への全国ポーリングは不要になった
     bosaiSub = await subscribeBosaiStatus(
@@ -639,7 +654,7 @@ function fmtStamp(iso: string): string {
 const DOCK: [WinId, string][] = [
   ["filter", "フィルター"],
   ["detail", "詳細"],
-  ["news", "ニュース"],
+  ["log", "発表ログ"],
 ];
 
 function onKey(e: KeyboardEvent) {
@@ -676,32 +691,19 @@ const telopRows = $derived.by(() => {
 <svelte:window onpointerdown={() => (lastTouch = Date.now())} onkeydown={onKey} />
 
 <div class="console">
+  <!-- ヘッダーは「ブランド／カテゴリ切替／受信状態」だけ。
+       件数は一覧の頭、状況とレイヤーは地図上、全国へ戻すは地図右下へ移した。
+       情報はそれが指す対象のそばに置く -->
   <header class="bar">
     <span class="beacon" class:live={phase === "ready"}></span>
     <span class="brand">防災オペレーション</span>
-    <div class="wsw">
-      <b>状況</b>
-      {#each WORKSPACES as w (w.id)}
-        <button class:on={situation === w.id} onclick={() => pickWorkspace(w.id)}>{w.label}</button>
-      {/each}
-    </div>
-    <div class="counts">
-      <div class="cnt">
-        <b style="color: {SEVERITY_COLOR.emergency}">{counts.emergency}</b><span>切迫</span>
-      </div>
-      <div class="cnt">
-        <b style="color: {SEVERITY_COLOR.warning}">{counts.warning}</b><span>警報</span>
-      </div>
-      <div class="cnt">
-        <b style="color: {SEVERITY_COLOR.advisory}">{counts.advisory}</b><span>注意報</span>
-      </div>
-      <div class="cnt"><b>{groups.length}</b><span>発令中の地域</span></div>
-    </div>
-    <div class="sidesw">
-      <button class:on={panelsOn} onclick={() => (panelsOn = !panelsOn)} title="情報パネルの表示切替">
-        パネル
+    <nav class="modes" aria-label="カテゴリ">
+      <button class:on={mode === "alert"} onclick={() => switchMode("alert")}>発令情報</button>
+      <button class:on={mode === "hazard"} onclick={() => switchMode("hazard")}>
+        ハザードマップ
       </button>
-    </div>
+      <button class="stripe-wip" disabled>観測<span class="soon">未実装</span></button>
+    </nav>
     <span class="grow"></span>
     {#if stalled}
       <span class="pad stall">リレーから受信できていません（{BOSAI_RELAY}）</span>
@@ -710,16 +712,25 @@ const telopRows = $derived.by(() => {
     {:else}
       <span class="mono dim pad">{received} 件受信</span>
     {/if}
-    {#if selectedPref}
-      <button class="ghost" onclick={resetView}>全国へ戻す</button>
-    {/if}
   </header>
 
   <div class="body">
-    {#if panelsOn}
-      <!-- 左：発令中一覧。視線が 一覧 → 地図 → 詳細 と一方向に流れるよう、
-           詳細と発表ログは反対側（右）に置く。並び順は CSS の order で作る -->
+    {#if mode === "alert"}
+      <!-- 左：発令中の都道府県別一覧。発令カテゴリのときだけ出す -->
       <section class="col col-list">
+        <!-- 件数は数字が指す対象（この一覧）の頭に置く。ヘッダーに置くと対象から遠い -->
+        <div class="cstrip">
+          <div class="cnt">
+            <b style="color: {SEVERITY_COLOR.emergency}">{counts.emergency}</b><span>切迫</span>
+          </div>
+          <div class="cnt">
+            <b style="color: {SEVERITY_COLOR.warning}">{counts.warning}</b><span>警報</span>
+          </div>
+          <div class="cnt">
+            <b style="color: {SEVERITY_COLOR.advisory}">{counts.advisory}</b><span>注意報</span>
+          </div>
+          <div class="cnt"><b>{groups.length}</b><span>地域</span></div>
+        </div>
         <div class="col-head">
           発令中<span class="sp"></span><b>{prefGroups.length}</b>県
           {#if orphanGroups.length > 0}／<b>{orphanGroups.length}</b>件{/if}
@@ -806,33 +817,6 @@ const telopRows = $derived.by(() => {
           {/if}
         </div>
       </section>
-
-      <!-- 右：発表ログ。詳細は固定枠ではなくウインドウで地図の上に出す -->
-      <section class="col col-side">
-        <div class="col-head">発表ログ<span class="sp"></span><b>{logRows.length}</b>件</div>
-        <div class="col-body">
-            <!-- キーに発表時刻を含める。同じ地域の更新でも行が作り直され、新着として光る -->
-            {#each logRows as r (`${r.key}:${r.publishedAt}`)}
-              <!-- 区域を持たない発表は押しても飛び先が無い。押せる見た目にしない -->
-              <button
-                class="logrow"
-                class:fresh={!!freshAt[r.key]}
-                disabled={!r.area}
-                onclick={() => r.area && pickArea(r.area.code)}
-              >
-                <span class="tm mono">{fmtStamp(r.publishedAt)}</span>
-                <i class="bar b-{r.severity}"></i>
-                <span class="c">
-                  <span class="h">{r.headline}</span>
-                  <span class="w">{HAZARD_LABEL[r.hazard]}{#if r.area} ／ {r.area.name}{/if}</span>
-                </span>
-              </button>
-            {/each}
-            {#if logRows.length === 0}
-              <p class="empty">受信待ち</p>
-            {/if}
-        </div>
-      </section>
     {/if}
 
     <!-- 中央：地図 -->
@@ -840,24 +824,39 @@ const telopRows = $derived.by(() => {
       <div class="stage">
         <div class="map" bind:this={mapEl}></div>
 
-        <!-- レイヤーの操作は地図の上に直接置く。
-             地図の表示を変える操作は、地図から離すと因果が見えない -->
-        <nav class="layerbox" aria-label="レイヤー">
-          <span class="lb-t">レイヤー</span>
-          {#each LAYERS as l, i (l.id)}
-            {#if l.hazard && !LAYERS[i - 1]?.hazard}
-              <span class="lb-sep" aria-hidden="true"></span>
-            {/if}
-            <button
-              class="lyr cut-sm"
-              class:on={layerOn[l.id]}
-              class:stripe-wip={!l.ready}
-              disabled={!l.ready}
-              onclick={() => toggleLayer(l.id)}
-            >
-              <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
-            </button>
-          {/each}
+        <!-- 地図の表示を変える操作（状況・レイヤー）は地図の上に直接置く。
+             地図から離すと因果が見えない -->
+        <nav class="layerbox" aria-label="表示の操作">
+          {#if mode === "alert"}
+            <span class="lb-t">状況</span>
+            <div class="lb-row">
+              {#each WORKSPACES as w (w.id)}
+                <button class:on={situation === w.id} onclick={() => pickWorkspace(w.id)}>
+                  {w.label}
+                </button>
+              {/each}
+            </div>
+            <span class="lb-sep" aria-hidden="true"></span>
+            <span class="lb-t">レイヤー</span>
+            {#each ALERT_LAYERS as l (l.id)}
+              <button
+                class="lyr cut-sm"
+                class:on={layerOn[l.id]}
+                class:stripe-wip={!l.ready}
+                disabled={!l.ready}
+                onclick={() => toggleLayer(l.id)}
+              >
+                <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
+              </button>
+            {/each}
+          {:else}
+            <span class="lb-t">ハザードマップ</span>
+            {#each HAZARD_TILES as h (h.id)}
+              <button class="lyr cut-sm" class:on={layerOn[h.id]} onclick={() => toggleLayer(h.id)}>
+                <i style="background: {h.color}"></i>{h.label}
+              </button>
+            {/each}
+          {/if}
         </nav>
 
         {#if phase === "loading"}
@@ -871,20 +870,22 @@ const telopRows = $derived.by(() => {
         <!-- 地図上端の中央に縦積みする。速報・切替の提案・注意を
              それぞれ absolute で置くと、同時に出たとき重なる -->
         <div class="stack-top">
-          {#each telopRows as t (t.key)}
-            <button class="flash cut-sm" onclick={() => t.area && pickArea(t.area.code)}>
-              <span class="fl-tag t-{t.severity}">速報</span>
-              <span class="fl-h">{t.headline}</span>
-              {#if t.area}<span class="fl-a">{t.area.name}</span>{/if}
-            </button>
-          {/each}
+          {#if mode === "alert"}
+            {#each telopRows as t (t.key)}
+              <button class="flash cut-sm" onclick={() => t.area && pickArea(t.area.code)}>
+                <span class="fl-tag t-{t.severity}">速報</span>
+                <span class="fl-h">{t.headline}</span>
+                {#if t.area}<span class="fl-a">{t.area.name}</span>{/if}
+              </button>
+            {/each}
 
-          {#if pending}
-            <div class="switchbar cut-sm">
-              <span>{WORKSPACES.find((w) => w.id === pending)?.label}の配置に切り替えますか</span>
-              <button onclick={() => applyWorkspace(pending!)}>切り替える</button>
-              <button class="ghosty" onclick={() => (pending = null)}>いいえ</button>
-            </div>
+            {#if pending}
+              <div class="switchbar cut-sm">
+                <span>{WORKSPACES.find((w) => w.id === pending)?.label}の配置に切り替えますか</span>
+                <button onclick={() => applyWorkspace(pending!)}>切り替える</button>
+                <button class="ghosty" onclick={() => (pending = null)}>いいえ</button>
+              </div>
+            {/if}
           {/if}
 
           {#if hazardTooWide}
@@ -893,16 +894,26 @@ const telopRows = $derived.by(() => {
         </div>
 
         {#if phase === "ready" && openWins.includes("detail")}
+          <!-- 詳細ウインドウは地域とニュースの共用。何を選んでもここに出る -->
           <OpsWindow
             title="詳細"
-            sub={detailGroup?.areaName ?? ""}
+            sub={detailKind === "news" ? "ニュース" : (detailGroup?.areaName ?? "")}
             geom={geom.detail}
             z={zOf("detail")}
             focused={zOrder.at(-1) === "detail"}
             onfocus={() => focusWin("detail")}
             onclose={() => toggleWin("detail")}
           >
-            {#if !detailGroup}
+            {#if detailKind === "news" && newsSel}
+              <div class="detail">
+                <div class="place">{newsSel.title}</div>
+                <div class="meta mono">{newsSource} ／ {fmtStamp(newsSel.publishedAt)}</div>
+                {#if newsSel.description}<p class="ntext">{newsSel.description}</p>{/if}
+                <a class="nlink" href={newsSel.link} target="_blank" rel="external noopener noreferrer">
+                  記事を開く ↗
+                </a>
+              </div>
+            {:else if !detailGroup}
               <p class="empty">一覧か地図から地域を選んでください</p>
             {:else}
               <div class="detail">
@@ -928,46 +939,40 @@ const telopRows = $derived.by(() => {
           </OpsWindow>
         {/if}
 
-        {#if phase === "ready" && openWins.includes("news")}
+        {#if phase === "ready" && mode === "alert" && openWins.includes("log")}
           <OpsWindow
-            title="ニュース"
-            sub={newsSource}
-            geom={geom.news}
-            z={zOf("news")}
-            focused={zOrder.at(-1) === "news"}
-            onfocus={() => focusWin("news")}
-            onclose={() => toggleWin("news")}
+            title="発表ログ"
+            sub="{logRows.length}件"
+            geom={geom.log}
+            z={zOf("log")}
+            focused={zOrder.at(-1) === "log"}
+            onfocus={() => focusWin("log")}
+            onclose={() => toggleWin("log")}
           >
-            {#if newsError}
-              <p class="empty">ニュースを取得できませんでした（{newsError}）</p>
-            {:else if news.length === 0}
-              <p class="empty">取得中…</p>
-            {:else}
-              {#each news as n (n.link)}
-                <div class="newsitem" class:open={openNews === n.link}>
-                  <button
-                    class="news-line"
-                    aria-expanded={openNews === n.link}
-                    onclick={() => (openNews = openNews === n.link ? null : n.link)}
-                  >
-                    <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
-                    <span class="ttl">{n.title}</span>
-                  </button>
-                  {#if openNews === n.link}
-                    <div class="news-detail">
-                      {#if n.description}<p>{n.description}</p>{/if}
-                      <a href={n.link} target="_blank" rel="external noopener noreferrer">
-                        記事を開く ↗
-                      </a>
-                    </div>
-                  {/if}
-                </div>
-              {/each}
+            <!-- キーに発表時刻を含める。同じ地域の更新でも行が作り直され、新着として光る -->
+            {#each logRows as r (`${r.key}:${r.publishedAt}`)}
+              <!-- 区域を持たない発表は押しても飛び先が無い。押せる見た目にしない -->
+              <button
+                class="logrow"
+                class:fresh={!!freshAt[r.key]}
+                disabled={!r.area}
+                onclick={() => r.area && pickArea(r.area.code)}
+              >
+                <span class="tm mono">{fmtStamp(r.publishedAt)}</span>
+                <i class="bar b-{r.severity}"></i>
+                <span class="c">
+                  <span class="h">{r.headline}</span>
+                  <span class="w">{HAZARD_LABEL[r.hazard]}{#if r.area} ／ {r.area.name}{/if}</span>
+                </span>
+              </button>
+            {/each}
+            {#if logRows.length === 0}
+              <p class="empty">受信待ち</p>
             {/if}
           </OpsWindow>
         {/if}
 
-        {#if phase === "ready" && openWins.includes("filter")}
+        {#if phase === "ready" && mode === "alert" && openWins.includes("filter")}
           <OpsWindow
             title="フィルター"
             geom={geom.filter}
@@ -988,29 +993,63 @@ const telopRows = $derived.by(() => {
           </OpsWindow>
         {/if}
 
-        <div class="dock">
-          {#each DOCK as [id, label] (id)}
-            <button class="cut-sm" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
-              {label}
-            </button>
-          {/each}
-        </div>
+        {#if mode === "alert"}
+          <div class="dock">
+            {#each DOCK as [id, label] (id)}
+              <button class="cut-sm" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
+                {label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        {#if selectedPref}
+          <!-- 地図を動かす操作なので地図の上（ズームボタンの並び）に置く -->
+          <button class="homebtn cut-sm" onclick={resetView}>全国へ戻す</button>
+        {/if}
 
         <p class="credit">
           出典: 気象庁（eew2nostr 経由）{#if hazardOn} ／ {HAZARD_ATTRIBUTION}{/if}
         </p>
 
-        <div class="legend">
-          {#each ["emergency", "warning", "advisory"] as lv (lv)}
-            <span>
-              <i style="background: {SEVERITY_COLOR[lv as Severity]}"></i>{SEVERITY_LABEL[lv as Severity]}
-            </span>
-          {/each}
-        </div>
+        {#if mode === "alert"}
+          <div class="legend">
+            {#each ["emergency", "warning", "advisory"] as lv (lv)}
+              <span>
+                <i style="background: {SEVERITY_COLOR[lv as Severity]}"></i>{SEVERITY_LABEL[lv as Severity]}
+              </span>
+            {/each}
+          </div>
+        {/if}
       </div>
 
     </div>
   </div>
+
+  <!-- ニュースは下部固定。押すと記事の内容が詳細ウインドウに出る -->
+  <footer class="news">
+    <div class="news-head">
+      ニュース{#if newsSource}<b>{newsSource}</b>{/if}
+    </div>
+    <div class="news-body">
+      {#if newsError}
+        <p class="empty">ニュースを取得できませんでした（{newsError}）</p>
+      {:else if news.length === 0}
+        <p class="empty">取得中…</p>
+      {:else}
+        {#each news as n (n.link)}
+          <button
+            class="newsrow"
+            class:sel={detailKind === "news" && newsSel?.link === n.link}
+            onclick={() => pickNews(n)}
+          >
+            <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
+            <span class="ttl">{n.title}</span>
+          </button>
+        {/each}
+      {/if}
+    </div>
+  </footer>
 
 
   {#if takeover}
@@ -1108,14 +1147,45 @@ const telopRows = $derived.by(() => {
   white-space: nowrap;
   border-right: 1px solid var(--line);
 }
-.counts { display: flex; min-width: 0; overflow: hidden; }
-.cnt {
+/* カテゴリのタブ。選択中はパネル色＋下線で「いまどこにいるか」を示す */
+.modes {
+  display: flex;
+  align-items: stretch;
+  button {
+    font: inherit;
+    font-size: var(--t-body);
+    padding: 0 var(--s4);
+    color: var(--ink-dim);
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--line);
+    cursor: pointer;
+    &.on {
+      background: var(--bg-panel);
+      color: var(--ink);
+      font-weight: var(--w-bold);
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+    &:disabled { color: var(--ink-faint); cursor: not-allowed; }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  }
+}
+
+/* 件数の帯。一覧カラムの頭 */
+.cstrip {
+  flex: none;
+  display: flex;
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--line);
+}
+.cstrip .cnt {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  padding: 0 var(--s4);
+  padding: var(--s2) var(--s3);
   border-right: 1px solid var(--line);
   white-space: nowrap;
+  &:last-child { border-right: none; }
   b {
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
@@ -1124,31 +1194,6 @@ const telopRows = $derived.by(() => {
     font-weight: var(--w-bold);
   }
   span { font-size: var(--t-micro); letter-spacing: var(--ls-label); color: var(--ink-faint); }
-}
-.wsw {
-  display: flex;
-  align-items: center;
-  gap: var(--s1);
-  padding: 0 var(--s3);
-  border-right: 1px solid var(--line);
-  b {
-    font-size: var(--t-micro);
-    letter-spacing: var(--ls-label);
-    color: var(--ink-faint);
-    font-weight: var(--w-bold);
-    margin-right: var(--s1);
-  }
-  button {
-    font: inherit;
-    font-size: var(--t-body);
-    padding: 6px 12px;
-    color: var(--ink-dim);
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    &.on { background: #22303a; color: var(--ink); font-weight: var(--w-bold); }
-    &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  }
 }
 
 /* 地図上端の中央。速報・提案・注意をここに縦積みする */
@@ -1219,33 +1264,21 @@ const telopRows = $derived.by(() => {
   }
 }
 
-.sidesw {
-  display: flex;
-  align-self: center;
-  margin-left: var(--s3);
-  button {
-    font: inherit;
-    font-size: var(--t-small);
-    color: var(--ink-dim);
-    background: transparent;
-    border: 1px solid var(--line-hi);
-    margin-left: -1px;
-    padding: 5px 10px;
-    cursor: pointer;
-    &.on { background: var(--ink); color: var(--bg-void); border-color: var(--ink); font-weight: var(--w-bold); }
-  }
-}
-.ghost {
-  align-self: center;
+/* 地図の視点を戻す。ズームボタンと同じ右下の並びに置く */
+.homebtn {
+  position: absolute;
+  right: 12px;
+  bottom: 96px;
+  z-index: 800;
   font: inherit;
   font-size: var(--t-small);
-  color: var(--ink-dim);
-  margin-right: var(--s4);
-  background: transparent;
+  color: var(--ink);
+  background: rgba(8, 11, 13, 0.9);
   border: 1px solid var(--line-hi);
   padding: 7px 12px;
   cursor: pointer;
-  &:hover { background: #1c262b; }
+  &:hover { background: var(--bg-raise); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 
 /* ---------- レイヤー操作（地図上のインライン） ---------- */
@@ -1271,6 +1304,23 @@ const telopRows = $derived.by(() => {
   padding: 0 2px;
 }
 .lb-sep { flex: none; height: 1px; margin: 2px 0; background: #2a373d; }
+/* 状況の切替。4つ横並びの小さなセグメント */
+.lb-row {
+  display: flex;
+  gap: 4px;
+  button {
+    flex: 1;
+    font: inherit;
+    font-size: var(--t-small);
+    padding: 5px 2px;
+    color: var(--ink-dim);
+    background: transparent;
+    border: 1px solid #2f3d44;
+    cursor: pointer;
+    &.on { background: #22303a; color: var(--ink); font-weight: var(--w-bold); border-color: var(--ink-faint); }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  }
+}
 .lyr {
   flex: none;
   display: inline-flex;
@@ -1315,9 +1365,6 @@ const telopRows = $derived.by(() => {
   background: var(--bg-panel);
 }
 .col-list { width: 340px; border-right: 1px solid var(--line); }
-/* DOM 上は一覧の隣だが、表示は地図の右に回す。
-   視線を 一覧 → 地図 → 詳細 の一方向に流すため */
-.col-side { width: 320px; order: 1; border-left: 1px solid var(--line); }
 
 .col-head {
   flex: none;
@@ -1626,19 +1673,56 @@ const telopRows = $derived.by(() => {
   to { background: transparent; }
 }
 
-/* ニュースウインドウの一覧。押すとその場で要約が開く */
-.newsitem {
+/* 詳細ウインドウに出すニュース記事 */
+.detail .ntext { margin: 0; font-size: var(--t-body); line-height: 1.7; color: var(--ink); }
+.detail .nlink {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: var(--t-small);
+  &:hover { text-decoration: underline; }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+/* ---------- ニュース（下部固定） ---------- */
+.news {
+  flex: none;
+  height: 148px;
   display: flex;
   flex-direction: column;
-  border-bottom: 1px solid #1c2529;
-  &.open { background: #10171b; }
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line);
 }
-.news-line {
+.news-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 5px var(--s3);
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-micro);
+  letter-spacing: var(--ls-label);
+  color: var(--ink-faint);
+  b { color: var(--ink-dim); letter-spacing: 0; font-weight: var(--w-normal); }
+}
+.news-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  /* 横に伸びる場所なので、見出しが読める幅で折り返す。
+     固定値のままだと狭い画面で右端が欠けるので min() で頭打ちにする */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(430px, 100%), 1fr));
+  align-content: start;
+}
+.newsrow {
   display: flex;
   gap: var(--s2);
   align-items: baseline;
-  padding: 7px var(--s3);
+  padding: 6px var(--s3);
   border: none;
+  border-bottom: 1px solid #1c2529;
+  border-right: 1px solid #1c2529;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1646,6 +1730,7 @@ const telopRows = $derived.by(() => {
   cursor: pointer;
   min-width: 0;
   &:hover { background: var(--bg-raise); }
+  &.sel { background: #16242f; box-shadow: inset 2px 0 0 var(--accent); }
   &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .tm { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
   .ttl {
@@ -1656,18 +1741,6 @@ const telopRows = $derived.by(() => {
     text-overflow: ellipsis;
   }
   &:hover .ttl { color: var(--ink); }
-}
-.newsitem.open .news-line .ttl { color: var(--ink); white-space: normal; }
-.news-detail {
-  padding: 0 var(--s3) var(--s2);
-  font-size: var(--t-small);
-  p { margin: 0 0 var(--s1); color: var(--ink-dim); line-height: 1.6; }
-  a {
-    color: var(--accent);
-    text-decoration: none;
-    &:hover { text-decoration: underline; }
-    &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  }
 }
 
 .filters { padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
