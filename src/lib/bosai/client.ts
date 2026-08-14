@@ -24,7 +24,7 @@ export interface BosaiSubscription {
  */
 export async function subscribeBosaiStatus(
   onStatus: (status: BosaiStatus) => void,
-  opts: { relays?: string[]; limit?: number } = {},
+  opts: { relays?: string[]; limit?: number; onEose?: () => void } = {},
 ): Promise<BosaiSubscription> {
   const { relays = [BOSAI_RELAY], limit = 800 } = opts;
 
@@ -52,6 +52,11 @@ export async function subscribeBosaiStatus(
         if (prev !== undefined && prev >= ev.created_at) return;
         seenAt.set(status.key, ev.created_at);
         onStatus(status);
+      },
+      // 溜まっている過去分を読み終えた合図。呼び出し側が
+      // 「再生」と「新着」を区別するために使う
+      oneose() {
+        opts.onEose?.();
       },
     },
   );
