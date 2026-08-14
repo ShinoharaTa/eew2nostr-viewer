@@ -47,7 +47,7 @@ import {
 } from "$lib/hazard/tiles";
 
 type Phase = "loading" | "ready" | "error";
-type WinId = "filter";
+type WinId = "filter" | "detail" | "news";
 
 let phase = $state<Phase>("loading");
 let errorText = $state("");
@@ -109,15 +109,17 @@ const hazardTooWide = $derived(hazardOn && mapZoom < hazardMinZoom);
 const hazardActive = $derived(hazardOn && mapZoom >= hazardMinZoom);
 
 // 位置と大きさはここで保持する。OpsWindow が直接書き換えるので、
-// 閉じて開き直しても動かした位置が残る
-// 座標は地図領域からの相対。サイドバーが左右どちらでも同じ扱いになる
-// 常に要るもの（一覧・詳細・発表ログ）は固定のカラムに置く。
-// ウィンドウは「常には要らないもの」だけにする
+// 閉じて開き直しても動かした位置が残る。座標は地図領域からの相対。
+// 常に要るもの（都道府県別の一覧・発表ログ）は固定のカラムに置き、
+// 見たいときだけ見るもの（詳細・ニュース・フィルター）はウインドウにする。
+// 詳細とニュースの初期位置は地図の大きさが分かってから決め直す
 const geom = $state({
-  filter: { x: 24, y: 58, w: 250, h: 190 },
+  filter: { x: 180, y: 10, w: 250, h: 190 },
+  detail: { x: 24, y: 10, w: 320, h: 340 },
+  news: { x: 24, y: 10, w: 560, h: 200 },
 });
-let openWins = $state<WinId[]>([]);
-let zOrder = $state<WinId[]>(["filter"]);
+let openWins = $state<WinId[]>(["news"]);
+let zOrder = $state<WinId[]>(["filter", "detail", "news"]);
 // 一覧（左）と詳細+ログ（右）をまとめて隠して、地図だけにできる
 let panelsOn = $state(true);
 
@@ -128,11 +130,8 @@ let news = $state<NewsItem[]>([]);
 let newsSource = $state("");
 let newsError = $state("");
 let newsTimer: ReturnType<typeof setInterval> | null = null;
-// ニュースは1行のティッカーに畳む。視線の主は防災情報で、ニュースは従。
-// 自動で巡回し、開いている（読んでいる）あいだは止める
-let tickerIdx = $state(0);
-let tickerOpen = $state(false);
-let rotTimer: ReturnType<typeof setInterval> | null = null;
+// 開いているニュース。ウインドウ内でその場に要約を開く
+let openNews = $state<string | null>(null);
 
 async function loadNews() {
   try {
@@ -369,10 +368,11 @@ const prefGroups = $derived.by(() => {
 // 都道府県に対応づかないもの。仕様書のとおり震央地名・津波予報区・火山・河川が該当する
 const orphanGroups = $derived(groups.filter((g) => !g.prefCode));
 
-// 折りたたみ。危ないものを隠さないよう、警報以上は既定で開く
+// 折りたたみ。一覧を県の行だけでスッキリ保つため、既定は畳む。
+// ただし切迫だけは畳んだ中に隠さない
 const expanded = $state<Record<string, boolean>>({});
 const isOpen = (p: PrefGroup) =>
-  expanded[p.prefCode] ?? SEVERITY_RANK[p.top] >= SEVERITY_RANK.warning;
+  expanded[p.prefCode] ?? SEVERITY_RANK[p.top] >= SEVERITY_RANK.emergency;
 function togglePref(code: string, cur: boolean) {
   expanded[code] = !cur;
 }
@@ -438,6 +438,9 @@ function pickArea(areaCode: string) {
   selectedArea = areaCode;
   const g = groups.find((x) => x.areaCode === areaCode);
   selectedPref = g?.prefCode ?? prefectureCodeOf(areaCode);
+  // 詳細はウインドウ。選んだら開いて前面に出す
+  if (!openWins.includes("detail")) openWins = [...openWins, "detail"];
+  focusWin("detail");
   restyle();
   zoomToPrefecture(selectedPref);
 }
@@ -562,6 +565,13 @@ onMount(async () => {
     map = m;
     phase = "ready";
 
+    // ウインドウの初期位置は地図の大きさが分かってから決める。
+    // ニュースは地図の下部、詳細は右上。動かした位置はそのまま残る
+    const sw = mapEl.clientWidth;
+    const sh = mapEl.clientHeight;
+    geom.news = { x: 24, y: Math.max(10, sh - 300), w: Math.min(640, sw - 48), h: 210 };
+    geom.detail = { x: Math.max(24, sw - 344), y: 10, w: 320, h: 340 };
+
     // 防災ステータスを購読する。気象庁への全国ポーリングは不要になった
     bosaiSub = await subscribeBosaiStatus(
       (st) => {
@@ -598,9 +608,6 @@ onMount(async () => {
 
     void loadNews();
     newsTimer = setInterval(() => void loadNews(), 5 * 60 * 1000);
-    rotTimer = setInterval(() => {
-      if (!tickerOpen && news.length > 1) tickerIdx = (tickerIdx + 1) % news.length;
-    }, 8000);
   } catch (e) {
     errorText = e instanceof Error ? e.message : String(e);
     phase = "error";
@@ -611,7 +618,6 @@ onDestroy(() => {
   if (stallTimer) clearTimeout(stallTimer);
   if (backfillTimer) clearTimeout(backfillTimer);
   if (newsTimer) clearInterval(newsTimer);
-  if (rotTimer) clearInterval(rotTimer);
   if (nowTimer) clearInterval(nowTimer);
   bosaiSub?.close();
   bosaiSub = null;
@@ -630,7 +636,11 @@ function fmtStamp(iso: string): string {
   return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-const DOCK: [WinId, string][] = [["filter", "フィルター"]];
+const DOCK: [WinId, string][] = [
+  ["filter", "フィルター"],
+  ["detail", "詳細"],
+  ["news", "ニュース"],
+];
 
 function onKey(e: KeyboardEvent) {
   lastTouch = Date.now();
@@ -704,23 +714,6 @@ const telopRows = $derived.by(() => {
       <button class="ghost" onclick={resetView}>全国へ戻す</button>
     {/if}
   </header>
-
-  <nav class="layers" aria-label="レイヤー">
-    {#each LAYERS as l, i (l.id)}
-      {#if l.hazard && !LAYERS[i - 1]?.hazard}
-        <span class="sep" aria-hidden="true"></span>
-      {/if}
-      <button
-        class="lyr cut-sm"
-        class:on={layerOn[l.id]}
-        class:stripe-wip={!l.ready}
-        disabled={!l.ready}
-        onclick={() => toggleLayer(l.id)}
-      >
-        <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
-      </button>
-    {/each}
-  </nav>
 
   <div class="body">
     {#if panelsOn}
@@ -814,43 +807,10 @@ const telopRows = $derived.by(() => {
         </div>
       </section>
 
-      <!-- 右：詳細（上）と発表ログ（下）。選んだ結果が地図のすぐ隣に出る -->
+      <!-- 右：発表ログ。詳細は固定枠ではなくウインドウで地図の上に出す -->
       <section class="col col-side">
-        <div class="pane pane-detail">
-          <div class="col-head">
-            詳細<span class="sp"></span>
-            {#if detailGroup}<b>{detailGroup.prefName ?? detailGroup.areaType}</b>{/if}
-          </div>
-          <div class="col-body">
-            {#if !detailGroup}
-              <p class="empty">一覧から地域を選んでください</p>
-            {:else}
-              <div class="detail">
-                <div class="place">{detailGroup.areaName}</div>
-                <div class="meta mono">
-                  {detailGroup.prefName ?? "—"} ／ {detailGroup.areaType} ／ {detailGroup.areaCode}
-                </div>
-                <div class="k">発表中</div>
-                <!-- 同じ地域に複数の情報が同時に出る。ブロックで並べると数と種類が一目で掴める -->
-                <div class="chips">
-                  {#each detailGroup.items as it (it.key)}
-                    <span class="chip cut-sm t-{it.severity}">{it.headline}</span>
-                  {/each}
-                </div>
-                <div class="k">発表時刻</div>
-                <div class="times">
-                  {#each detailGroup.items as it (it.key)}
-                    <div><span>{fmtStamp(it.publishedAt)}</span>{it.headline}</div>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-          </div>
-        </div>
-
-        <div class="pane pane-log">
-          <div class="col-head">発表ログ<span class="sp"></span><b>{logRows.length}</b>件</div>
-          <div class="col-body">
+        <div class="col-head">発表ログ<span class="sp"></span><b>{logRows.length}</b>件</div>
+        <div class="col-body">
             <!-- キーに発表時刻を含める。同じ地域の更新でも行が作り直され、新着として光る -->
             {#each logRows as r (`${r.key}:${r.publishedAt}`)}
               <!-- 区域を持たない発表は押しても飛び先が無い。押せる見た目にしない -->
@@ -871,7 +831,6 @@ const telopRows = $derived.by(() => {
             {#if logRows.length === 0}
               <p class="empty">受信待ち</p>
             {/if}
-          </div>
         </div>
       </section>
     {/if}
@@ -880,6 +839,26 @@ const telopRows = $derived.by(() => {
     <div class="main">
       <div class="stage">
         <div class="map" bind:this={mapEl}></div>
+
+        <!-- レイヤーの操作は地図の上に直接置く。
+             地図の表示を変える操作は、地図から離すと因果が見えない -->
+        <nav class="layerbox" aria-label="レイヤー">
+          <span class="lb-t">レイヤー</span>
+          {#each LAYERS as l, i (l.id)}
+            {#if l.hazard && !LAYERS[i - 1]?.hazard}
+              <span class="lb-sep" aria-hidden="true"></span>
+            {/if}
+            <button
+              class="lyr cut-sm"
+              class:on={layerOn[l.id]}
+              class:stripe-wip={!l.ready}
+              disabled={!l.ready}
+              onclick={() => toggleLayer(l.id)}
+            >
+              <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
+            </button>
+          {/each}
+        </nav>
 
         {#if phase === "loading"}
           <div class="overlay"><span>気象庁のデータを取得しています…</span></div>
@@ -912,6 +891,81 @@ const telopRows = $derived.by(() => {
             <p class="hintbar cut-sm">ハザードマップはこの広さでは表示されません。拡大すると出ます。</p>
           {/if}
         </div>
+
+        {#if phase === "ready" && openWins.includes("detail")}
+          <OpsWindow
+            title="詳細"
+            sub={detailGroup?.areaName ?? ""}
+            geom={geom.detail}
+            z={zOf("detail")}
+            focused={zOrder.at(-1) === "detail"}
+            onfocus={() => focusWin("detail")}
+            onclose={() => toggleWin("detail")}
+          >
+            {#if !detailGroup}
+              <p class="empty">一覧か地図から地域を選んでください</p>
+            {:else}
+              <div class="detail">
+                <div class="place">{detailGroup.areaName}</div>
+                <div class="meta mono">
+                  {detailGroup.prefName ?? "—"} ／ {detailGroup.areaType} ／ {detailGroup.areaCode}
+                </div>
+                <div class="k">発表中</div>
+                <!-- 同じ地域に複数の情報が同時に出る。ブロックで並べると数と種類が一目で掴める -->
+                <div class="chips">
+                  {#each detailGroup.items as it (it.key)}
+                    <span class="chip cut-sm t-{it.severity}">{it.headline}</span>
+                  {/each}
+                </div>
+                <div class="k">発表時刻</div>
+                <div class="times">
+                  {#each detailGroup.items as it (it.key)}
+                    <div><span>{fmtStamp(it.publishedAt)}</span>{it.headline}</div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </OpsWindow>
+        {/if}
+
+        {#if phase === "ready" && openWins.includes("news")}
+          <OpsWindow
+            title="ニュース"
+            sub={newsSource}
+            geom={geom.news}
+            z={zOf("news")}
+            focused={zOrder.at(-1) === "news"}
+            onfocus={() => focusWin("news")}
+            onclose={() => toggleWin("news")}
+          >
+            {#if newsError}
+              <p class="empty">ニュースを取得できませんでした（{newsError}）</p>
+            {:else if news.length === 0}
+              <p class="empty">取得中…</p>
+            {:else}
+              {#each news as n (n.link)}
+                <div class="newsitem" class:open={openNews === n.link}>
+                  <button
+                    class="news-line"
+                    aria-expanded={openNews === n.link}
+                    onclick={() => (openNews = openNews === n.link ? null : n.link)}
+                  >
+                    <span class="tm mono">{fmtStamp(n.publishedAt)}</span>
+                    <span class="ttl">{n.title}</span>
+                  </button>
+                  {#if openNews === n.link}
+                    <div class="news-detail">
+                      {#if n.description}<p>{n.description}</p>{/if}
+                      <a href={n.link} target="_blank" rel="external noopener noreferrer">
+                        記事を開く ↗
+                      </a>
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          </OpsWindow>
+        {/if}
 
         {#if phase === "ready" && openWins.includes("filter")}
           <OpsWindow
@@ -958,37 +1012,6 @@ const telopRows = $derived.by(() => {
     </div>
   </div>
 
-  <!-- ニュースは1行に畳む。視線の主は防災情報で、ニュースは従。
-       押すと要約がバーの上に開き、記事へのリンクはその中に出す -->
-  <footer class="newsbar">
-    <span class="nw-src">ニュース{#if newsSource}・{newsSource}{/if}</span>
-    {#if newsError}
-      <span class="nw-dim">取得できませんでした（{newsError}）</span>
-    {:else if news.length === 0}
-      <span class="nw-dim">取得中…</span>
-    {:else}
-      {@const cur = news[tickerIdx % news.length]}
-      <button class="nw-line" aria-expanded={tickerOpen} onclick={() => (tickerOpen = !tickerOpen)}>
-        <span class="tm mono">{fmtStamp(cur.publishedAt)}</span>
-        <span class="ttl">{cur.title}</span>
-      </button>
-      <span class="nw-pos mono">{(tickerIdx % news.length) + 1}/{news.length}</span>
-      <button
-        class="nw-nav"
-        aria-label="次のニュース"
-        onclick={() => {
-          tickerIdx = (tickerIdx + 1) % news.length;
-          tickerOpen = false;
-        }}
-      >▸</button>
-      {#if tickerOpen}
-        <div class="nw-pop cut-sm">
-          {#if cur.description}<p>{cur.description}</p>{/if}
-          <a href={cur.link} target="_blank" rel="external noopener noreferrer">記事を開く ↗</a>
-        </div>
-      {/if}
-    {/if}
-  </footer>
 
   {#if takeover}
     <!-- 警報と震度5弱以上の予報だけ画面を覆う。
@@ -1225,19 +1248,29 @@ const telopRows = $derived.by(() => {
   &:hover { background: #1c262b; }
 }
 
-/* ---------- レイヤー帯 ---------- */
-.layers {
-  flex: none;
+/* ---------- レイヤー操作（地図上のインライン） ---------- */
+.layerbox {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 800;
   display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px var(--s3);
-  background: #0e1417;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-  scrollbar-width: none;
-  &::-webkit-scrollbar { display: none; }
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: var(--s2);
+  background: rgba(8, 11, 13, 0.88);
+  border: 1px solid var(--line);
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
 }
+.lb-t {
+  font-size: var(--t-micro);
+  letter-spacing: var(--ls-label);
+  color: var(--ink-faint);
+  padding: 0 2px;
+}
+.lb-sep { flex: none; height: 1px; margin: 2px 0; background: #2a373d; }
 .lyr {
   flex: none;
   display: inline-flex;
@@ -1268,7 +1301,6 @@ const telopRows = $derived.by(() => {
   &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 .soon { font-size: var(--t-micro); color: var(--ink-faint); margin-left: 3px; }
-.sep { flex: none; width: 1px; align-self: stretch; margin: 0 var(--s1); background: #2a373d; }
 
 /* ---------- 本体 ---------- */
 .body { flex: 1; display: flex; min-height: 0; }
@@ -1286,12 +1318,6 @@ const telopRows = $derived.by(() => {
 /* DOM 上は一覧の隣だが、表示は地図の右に回す。
    視線を 一覧 → 地図 → 詳細 の一方向に流すため */
 .col-side { width: 320px; order: 1; border-left: 1px solid var(--line); }
-
-.pane { display: flex; flex-direction: column; min-height: 0; }
-/* 高さは固定する。内容の量に合わせると、地域を選ぶたびに
-   発表ログとの境界が跳ねて、読んでいる行を見失う */
-.pane-detail { flex: 0 0 46%; border-bottom: 1px solid var(--line); }
-.pane-log { flex: 1 1 auto; }
 
 .col-head {
   flex: none;
@@ -1457,84 +1483,8 @@ const telopRows = $derived.by(() => {
 .t-advisory { background: var(--sev-advisory); color: var(--on-advisory); }
 .t-info { background: var(--sev-info); color: var(--on-info); }
 
-/* 地図。ニュースは console 直下の1行バーに出す */
+/* 地図。ニュースと詳細は地図上のウインドウに出す */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-
-/* ---------- ニュースティッカー ---------- */
-.newsbar {
-  flex: none;
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  height: 34px;
-  padding: 0 var(--s3);
-  background: var(--bg-panel);
-  border-top: 1px solid var(--line);
-}
-.nw-src {
-  flex: none;
-  font-size: var(--t-micro);
-  letter-spacing: var(--ls-label);
-  color: var(--ink-faint);
-}
-.nw-dim { color: var(--ink-faint); font-size: var(--t-small); }
-.nw-line {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  gap: var(--s2);
-  align-items: baseline;
-  padding: 6px 0;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  .tm { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
-  .ttl {
-    font-size: var(--t-small);
-    color: var(--ink-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  &:hover .ttl { color: var(--ink); }
-  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-}
-.nw-pos { flex: none; font-size: var(--t-micro); color: var(--ink-faint); }
-.nw-nav {
-  flex: none;
-  font: inherit;
-  font-size: var(--t-small);
-  color: var(--ink-dim);
-  background: transparent;
-  border: 1px solid var(--line-hi);
-  padding: 2px 9px;
-  cursor: pointer;
-  &:hover { background: var(--bg-raise); }
-  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-}
-/* 開いた要約はバーの上に浮かべる。バー自体を伸ばすと地図の高さが動く */
-.nw-pop {
-  position: absolute;
-  left: var(--s3);
-  bottom: calc(100% + 6px);
-  z-index: 840;
-  max-width: 720px;
-  background: var(--bg-raise);
-  border: 1px solid var(--line-hi);
-  padding: var(--s3);
-  font-size: var(--t-small);
-  p { margin: 0 0 var(--s2); color: var(--ink); line-height: 1.6; }
-  a {
-    color: var(--accent);
-    text-decoration: none;
-    &:hover { text-decoration: underline; }
-    &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  }
-}
 
 /* ---------- 地図 ---------- */
 .stage { flex: 1; position: relative; min-width: 0; }
@@ -1674,6 +1624,50 @@ const telopRows = $derived.by(() => {
 @keyframes fresh-fade {
   from { background: color-mix(in srgb, var(--accent) 24%, transparent); }
   to { background: transparent; }
+}
+
+/* ニュースウインドウの一覧。押すとその場で要約が開く */
+.newsitem {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid #1c2529;
+  &.open { background: #10171b; }
+}
+.news-line {
+  display: flex;
+  gap: var(--s2);
+  align-items: baseline;
+  padding: 7px var(--s3);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  &:hover { background: var(--bg-raise); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tm { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
+  .ttl {
+    font-size: var(--t-small);
+    color: var(--ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  &:hover .ttl { color: var(--ink); }
+}
+.newsitem.open .news-line .ttl { color: var(--ink); white-space: normal; }
+.news-detail {
+  padding: 0 var(--s3) var(--s2);
+  font-size: var(--t-small);
+  p { margin: 0 0 var(--s1); color: var(--ink-dim); line-height: 1.6; }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+    &:hover { text-decoration: underline; }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  }
 }
 
 .filters { padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
