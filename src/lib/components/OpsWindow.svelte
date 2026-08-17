@@ -28,6 +28,16 @@ let collapsed = $state(false);
 
 const MIN_W = 200;
 const MIN_H = 90;
+/* 画面の外へ出せる余地。これより先へは掴んで持ち出せない。
+   タブレットは回転で領域が急に狭くなるので、届かない場所を作らない */
+const KEEP_X = 60;
+const KEEP_Y = 40;
+
+/** ウインドウを載せている領域（.stage）の大きさ。ドラッグの上限に使う */
+function hostSize(el: HTMLElement): { w: number; h: number } | null {
+  const host = (el.closest(".win") as HTMLElement | null)?.offsetParent;
+  return host instanceof HTMLElement ? { w: host.clientWidth, h: host.clientHeight } : null;
+}
 
 function startDrag(e: PointerEvent) {
   if ((e.target as HTMLElement).closest("button")) return;
@@ -37,10 +47,15 @@ function startDrag(e: PointerEvent) {
   const sy = e.clientY;
   const ox = geom.x;
   const oy = geom.y;
+  const host = hostSize(el);
   el.setPointerCapture(e.pointerId);
   const move = (ev: PointerEvent) => {
     geom.x = Math.max(0, ox + ev.clientX - sx);
     geom.y = Math.max(0, oy + ev.clientY - sy);
+    if (host) {
+      geom.x = Math.min(geom.x, Math.max(0, host.w - KEEP_X));
+      geom.y = Math.min(geom.y, Math.max(0, host.h - KEEP_Y));
+    }
   };
   const up = () => {
     el.removeEventListener("pointermove", move);
@@ -58,10 +73,16 @@ function startResize(e: PointerEvent) {
   const sy = e.clientY;
   const ow = geom.w;
   const oh = geom.h;
+  const host = hostSize(el);
   el.setPointerCapture(e.pointerId);
   const move = (ev: PointerEvent) => {
     geom.w = Math.max(MIN_W, ow + ev.clientX - sx);
     geom.h = Math.max(MIN_H, oh + ev.clientY - sy);
+    // 領域より大きくしても操作できない場所が増えるだけ
+    if (host) {
+      geom.w = Math.min(geom.w, host.w);
+      geom.h = Math.min(geom.h, host.h);
+    }
   };
   const up = () => {
     el.removeEventListener("pointermove", move);
@@ -171,5 +192,12 @@ function startResize(e: PointerEvent) {
   cursor: nwse-resize;
   touch-action: none;
   background: linear-gradient(135deg, transparent 50%, #35454d 50%);
+}
+
+/* 指で操作する端末では掴む場所を大きくする。44px が目安 */
+@media (pointer: coarse) {
+  .head { padding: 10px; }
+  .ctl { padding: 8px 12px; }
+  .grip { width: 28px; height: 28px; }
 }
 </style>
