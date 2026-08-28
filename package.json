@@ -16,11 +16,11 @@
     "lint": "eslint ."
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
+    "@eslint/js": "^10.0.1",
     "@sveltejs/adapter-node": "^5.5.7",
     "@sveltejs/adapter-vercel": "^6.3.4",
     "@sveltejs/kit": "^2.70.3",
-    "eslint": "^9.39.5",
+    "eslint": "^10.9.1",
     "eslint-plugin-svelte": "^3.23.0",
     "globals": "^17.11.0",
     "sass": "^1.103.1",
