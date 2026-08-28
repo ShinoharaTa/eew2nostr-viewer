@@ -133,6 +133,26 @@ const geom = $state({
 let openWins = $state<WinId[]>([]);
 let zOrder = $state<WinId[]>(["filter", "detail", "log"]);
 
+// ---- 狭い画面への追従 ----
+// 640px 以下では一覧カラムが地図を潰すので、引き出し（ドロワー）にする。
+// レイヤー箱も 900px 以下では畳んでおく。初期値は onMount で画面幅から決める
+let listOpen = $state(true);
+let layersOpen = $state(true);
+const isNarrow = () => browser && window.matchMedia("(max-width: 640px)").matches;
+
+// 回転や折りたたみの開閉で領域が急に狭くなると、ウインドウが画面外に残される。
+// 動かした位置は尊重しつつ、届く範囲までは引き戻す
+function clampWindows() {
+  if (!mapEl) return;
+  const w = mapEl.clientWidth;
+  const h = mapEl.clientHeight;
+  for (const g of Object.values(geom)) {
+    g.x = Math.min(g.x, Math.max(0, w - 60));
+    g.y = Math.min(g.y, Math.max(0, h - 40));
+    g.w = Math.min(g.w, Math.max(200, w));
+  }
+}
+
 // ---- ニュース ----
 // 配信元が CORS を開けていないので、サーバ側の中継 (/api/news) 経由で取る
 interface NewsItem { title: string; link: string; description: string; publishedAt: string; }
@@ -454,6 +474,8 @@ function pickArea(areaCode: string) {
   detailKind = "area";
   if (!openWins.includes("detail")) openWins = [...openWins, "detail"];
   focusWin("detail");
+  // ドロワーの一覧から選んだら閉じる。狭い画面では地図と詳細を見る番
+  if (isNarrow()) listOpen = false;
   restyle();
   zoomToPrefecture(selectedPref);
 }
@@ -516,6 +538,10 @@ function toggleLayer(id: string) {
 onMount(async () => {
   if (!browser) return;
   try {
+    // 画面幅に合わせた初期状態。狭ければ一覧は引き出しに畳み、レイヤー箱も閉じる
+    listOpen = !window.matchMedia("(max-width: 640px)").matches;
+    layersOpen = !window.matchMedia("(max-width: 900px)").matches;
+
     // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
     // 地域名は 30830 のレコードが持っているので area.json は要らない。
     // 取るのは地図のポリゴンだけ
@@ -688,7 +714,11 @@ const telopRows = $derived.by(() => {
 
 <svelte:head><title>防災ダッシュボード</title></svelte:head>
 
-<svelte:window onpointerdown={() => (lastTouch = Date.now())} onkeydown={onKey} />
+<svelte:window
+  onpointerdown={() => (lastTouch = Date.now())}
+  onkeydown={onKey}
+  onresize={clampWindows}
+/>
 
 <div class="console">
   <!-- ヘッダーは「ブランド／カテゴリ切替／受信状態」だけ。
@@ -696,7 +726,8 @@ const telopRows = $derived.by(() => {
        情報はそれが指す対象のそばに置く -->
   <header class="bar">
     <span class="beacon" class:live={phase === "ready"}></span>
-    <span class="brand">防災オペレーション</span>
+    <!-- 狭い画面ではタブを立たせるため、ブランドを短くする -->
+    <span class="brand"><span class="b-full">防災オペレーション</span><span class="b-short">防災</span></span>
     <nav class="modes" aria-label="カテゴリ">
       <button class:on={mode === "alert"} onclick={() => switchMode("alert")}>発令情報</button>
       <button class:on={mode === "hazard"} onclick={() => switchMode("hazard")}>
@@ -716,8 +747,11 @@ const telopRows = $derived.by(() => {
 
   <div class="body">
     {#if mode === "alert"}
+      <!-- 狭い画面では一覧が引き出しになる。外側を押したら閉じる。
+           キーボード操作は dock の「一覧」ボタンが担うので、これは指専用 -->
+      <div class="scrim" class:show={listOpen} onclick={() => (listOpen = false)} aria-hidden="true"></div>
       <!-- 左：発令中の都道府県別一覧。発令カテゴリのときだけ出す -->
-      <section class="col col-list">
+      <section class="col col-list" class:open={listOpen}>
         <!-- 件数は数字が指す対象（この一覧）の頭に置く。ヘッダーに置くと対象から遠い -->
         <div class="cstrip">
           <div class="cnt">
@@ -737,6 +771,7 @@ const telopRows = $derived.by(() => {
           {#if selectedPref}
             <button class="mini" onclick={resetView}>全国</button>
           {/if}
+          <button class="mini drawer-close" onclick={() => (listOpen = false)}>閉じる</button>
         </div>
         <div class="col-body">
           {#if prefGroups.length === 0 && orphanGroups.length === 0}
@@ -827,7 +862,12 @@ const telopRows = $derived.by(() => {
         <!-- 地図の表示を変える操作（状況・レイヤー）は地図の上に直接置く。
              地図から離すと因果が見えない -->
         <nav class="layerbox" aria-label="表示の操作">
-          {#if mode === "alert"}
+          <!-- 狭い地図では箱そのものが邪魔になるので、畳めるようにする -->
+          <button class="lb-head" aria-expanded={layersOpen} onclick={() => (layersOpen = !layersOpen)}>
+            {mode === "alert" ? "状況・レイヤー" : "ハザードマップ"}
+            <span class="lb-arrow">{layersOpen ? "▾" : "▸"}</span>
+          </button>
+          {#if layersOpen && mode === "alert"}
             <span class="lb-t">状況</span>
             <div class="lb-row">
               {#each WORKSPACES as w (w.id)}
@@ -849,8 +889,7 @@ const telopRows = $derived.by(() => {
                 <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
               </button>
             {/each}
-          {:else}
-            <span class="lb-t">ハザードマップ</span>
+          {:else if layersOpen}
             {#each HAZARD_TILES as h (h.id)}
               <button class="lyr cut-sm" class:on={layerOn[h.id]} onclick={() => toggleLayer(h.id)}>
                 <i style="background: {h.color}"></i>{h.label}
@@ -995,6 +1034,10 @@ const telopRows = $derived.by(() => {
 
         {#if mode === "alert"}
           <div class="dock">
+            <!-- 狭い画面だけに出る。引き出しにした一覧の呼び出し口 -->
+            <button class="cut-sm listbtn" class:on={listOpen} onclick={() => (listOpen = !listOpen)}>
+              一覧
+            </button>
             {#each DOCK as [id, label] (id)}
               <button class="cut-sm" class:on={openWins.includes(id)} onclick={() => toggleWin(id)}>
                 {label}
@@ -1110,6 +1153,9 @@ const telopRows = $derived.by(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* モバイルブラウザはツールバーの出入りで 100vh が実画面より大きくなり、
+     下端のニュースが隠れる。対応ブラウザでは実表示領域に合わせる */
+  height: 100dvh;
   background: var(--bg-void);
   color: var(--ink);
   overflow: hidden;
@@ -1160,6 +1206,8 @@ const telopRows = $derived.by(() => {
     border: none;
     border-right: 1px solid var(--line);
     cursor: pointer;
+    /* 折り返すと縦書き状態になって読めない */
+    white-space: nowrap;
     &.on {
       background: var(--bg-panel);
       color: var(--ink);
@@ -1303,6 +1351,24 @@ const telopRows = $derived.by(() => {
   color: var(--ink-faint);
   padding: 0 2px;
 }
+/* 箱の畳み。見出しがそのままトグルになる */
+.lb-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font: inherit;
+  font-size: var(--t-micro);
+  letter-spacing: var(--ls-label);
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  text-align: left;
+  &:hover { color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .lb-arrow { margin-left: auto; color: var(--ink-faint); }
+}
 .lb-sep { flex: none; height: 1px; margin: 2px 0; background: #2a373d; }
 /* 状況の切替。4つ横並びの小さなセグメント */
 .lb-row {
@@ -1353,7 +1419,8 @@ const telopRows = $derived.by(() => {
 .soon { font-size: var(--t-micro); color: var(--ink-faint); margin-left: 3px; }
 
 /* ---------- 本体 ---------- */
-.body { flex: 1; display: flex; min-height: 0; }
+/* relative は狭い画面の引き出し（一覧）の基準になる */
+.body { flex: 1; display: flex; min-height: 0; position: relative; }
 
 /* 常に要るものは固定のカラムに置く。画面端に接するので45度カットしない。
    固定と浮動を形で区別する */
@@ -1744,6 +1811,77 @@ const telopRows = $derived.by(() => {
 }
 
 .filters { padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+
+/* ---------- 狭い画面への追従 ---------- */
+/* 基準は2つ。900px（iPad 縦・Fold 開）では詰め、
+   640px（Fold 閉・スマホ）では一覧を引き出しにする */
+.brand .b-short { display: none; }
+.scrim { display: none; }
+.drawer-close { display: none; }
+.dock .listbtn { display: none; }
+
+@media (max-width: 900px) {
+  .col-list { width: min(340px, 44vw); }
+}
+
+@media (max-width: 640px) {
+  .brand .b-full { display: none; }
+  .brand .b-short { display: inline; }
+  .modes button { padding: 0 var(--s3); font-size: var(--t-small); }
+  /* 受信件数の文字は畳む。生存表示はランプが担う */
+  .pad { display: none; }
+  .stall { font-size: var(--t-micro); }
+
+  /* 一覧は引き出し。340px 固定のままでは地図が 70px しか残らない */
+  .col-list {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 860;
+    width: min(340px, 86vw);
+    border-right: 1px solid var(--line-hi);
+    box-shadow: 14px 0 36px rgba(0, 0, 0, 0.55);
+    transition: transform 0.18s ease-out;
+    &:not(.open) { transform: translateX(-110%); }
+  }
+  .scrim.show {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 855;
+    background: rgba(8, 11, 13, 0.55);
+  }
+  .drawer-close { display: block; }
+  .dock .listbtn { display: block; }
+  /* 下端は dock が占める。凡例と視点戻しは一段上へ逃がす */
+  .legend { right: 12px; bottom: 92px; }
+  .homebtn { bottom: 140px; }
+}
+
+/* 指で操作する端末。掴む場所を 44px 目安まで広げる */
+@media (pointer: coarse) {
+  .twist { width: 38px; }
+  .lyr { min-height: 42px; }
+  .lb-row button { padding: 10px 2px; }
+  .lb-head { padding: 6px 2px; }
+  .dock button { padding: 11px 16px; }
+  .mini { padding: 7px 12px; }
+  .logrow,
+  .newsrow { padding-top: 10px; padding-bottom: 10px; }
+  .row { padding-top: 10px; padding-bottom: 10px; }
+  .homebtn { padding: 11px 14px; }
+  .tk-close { min-height: 44px; }
+}
+
+/* タッチはホバーが無いので、押した瞬間の反応を返す */
+.row:active,
+.prefname:active,
+.newsrow:active,
+.lyr:active:not(:disabled),
+.logrow:active:not(:disabled) {
+  background: var(--bg-raise);
+}
 .fchk {
   display: flex;
   align-items: center;
