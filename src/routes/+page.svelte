@@ -125,19 +125,19 @@ const hazardActive = $derived(hazardOn && mapZoom >= hazardMinZoom);
 // 常に要るもの（都道府県別の一覧・ニュース）は固定の枠に置き、
 // 見たいときだけ見るもの（詳細・発表ログ・フィルター）はウインドウにする。
 // 詳細と発表ログの初期位置は地図の大きさが分かってから決め直す
+// y の起点は地図上端のバー（36px）の下
 const geom = $state({
-  filter: { x: 180, y: 10, w: 250, h: 190 },
-  detail: { x: 24, y: 10, w: 320, h: 340 },
-  log: { x: 24, y: 10, w: 340, h: 380 },
+  filter: { x: 180, y: 46, w: 250, h: 190 },
+  detail: { x: 24, y: 46, w: 320, h: 340 },
+  log: { x: 24, y: 46, w: 340, h: 380 },
 });
 let openWins = $state<WinId[]>([]);
 let zOrder = $state<WinId[]>(["filter", "detail", "log"]);
 
 // ---- 狭い画面への追従 ----
 // 640px 以下では一覧カラムが地図を潰すので、引き出し（ドロワー）にする。
-// レイヤー箱も 900px 以下では畳んでおく。初期値は onMount で画面幅から決める
+// 初期値は onMount で画面幅から決める
 let listOpen = $state(true);
-let layersOpen = $state(true);
 const isNarrow = () => browser && window.matchMedia("(max-width: 640px)").matches;
 
 // 回転や折りたたみの開閉で領域が急に狭くなると、ウインドウが画面外に残される。
@@ -538,9 +538,8 @@ function toggleLayer(id: string) {
 onMount(async () => {
   if (!browser) return;
   try {
-    // 画面幅に合わせた初期状態。狭ければ一覧は引き出しに畳み、レイヤー箱も閉じる
+    // 画面幅に合わせた初期状態。狭ければ一覧は引き出しに畳む
     listOpen = !window.matchMedia("(max-width: 640px)").matches;
-    layersOpen = !window.matchMedia("(max-width: 900px)").matches;
 
     // leaflet は window に触れるので、SSR のモジュールグラフに入れず動的に読む
     // 地域名は 30830 のレコードが持っているので area.json は要らない。
@@ -610,8 +609,8 @@ onMount(async () => {
     // 詳細は右上、発表ログはその下。動かした位置はそのまま残る
     const sw = mapEl.clientWidth;
     const sh = mapEl.clientHeight;
-    geom.detail = { x: Math.max(24, sw - 344), y: 10, w: 320, h: 340 };
-    geom.log = { x: Math.max(24, sw - 364), y: 360, w: 340, h: Math.max(240, sh - 420) };
+    geom.detail = { x: Math.max(24, sw - 344), y: 46, w: 320, h: 340 };
+    geom.log = { x: Math.max(24, sw - 364), y: 396, w: 340, h: Math.max(220, sh - 460) };
 
     // 防災ステータスを購読する。気象庁への全国ポーリングは不要になった
     bosaiSub = await subscribeBosaiStatus(
@@ -860,24 +859,21 @@ const telopRows = $derived.by(() => {
         <div class="map" bind:this={mapEl}></div>
 
         <!-- 地図の表示を変える操作（状況・レイヤー）は地図の上に直接置く。
-             地図から離すと因果が見えない -->
-        <nav class="layerbox" aria-label="表示の操作">
-          <!-- 狭い地図では箱そのものが邪魔になるので、畳めるようにする -->
-          <button class="lb-head" aria-expanded={layersOpen} onclick={() => (layersOpen = !layersOpen)}>
-            {mode === "alert" ? "状況・レイヤー" : "ハザードマップ"}
-            <span class="lb-arrow">{layersOpen ? "▾" : "▸"}</span>
-          </button>
-          {#if layersOpen && mode === "alert"}
-            <span class="lb-t">状況</span>
-            <div class="lb-row">
-              {#each WORKSPACES as w (w.id)}
-                <button class:on={situation === w.id} onclick={() => pickWorkspace(w.id)}>
-                  {w.label}
-                </button>
-              {/each}
-            </div>
-            <span class="lb-sep" aria-hidden="true"></span>
-            <span class="lb-t">レイヤー</span>
+             地図から離すと因果が見えない。
+             縦の箱だと地図を侵食するので、上端の横1行に畳む。
+             入り切らないぶんはバーの中で横に流す -->
+        <nav class="mapbar" aria-label="表示の操作">
+          {#if mode === "alert"}
+            <span class="mb-t">状況</span>
+            {#each WORKSPACES as w (w.id)}
+              <button
+                class="seg"
+                class:on={situation === w.id}
+                onclick={() => pickWorkspace(w.id)}
+              >{w.label}</button>
+            {/each}
+            <span class="mb-sep" aria-hidden="true"></span>
+            <span class="mb-t">レイヤー</span>
             {#each ALERT_LAYERS as l (l.id)}
               <button
                 class="lyr cut-sm"
@@ -889,7 +885,8 @@ const telopRows = $derived.by(() => {
                 <i style="background: {l.color}"></i>{l.label}{#if !l.ready}<span class="soon">未実装</span>{/if}
               </button>
             {/each}
-          {:else if layersOpen}
+          {:else}
+            <span class="mb-t">ハザードマップ</span>
             {#each HAZARD_TILES as h (h.id)}
               <button class="lyr cut-sm" class:on={layerOn[h.id]} onclick={() => toggleLayer(h.id)}>
                 <i style="background: {h.color}"></i>{h.label}
@@ -1244,11 +1241,11 @@ const telopRows = $derived.by(() => {
   span { font-size: var(--t-micro); letter-spacing: var(--ls-label); color: var(--ink-faint); }
 }
 
-/* 地図上端の中央。速報・提案・注意をここに縦積みする */
+/* 地図上端の中央。速報・提案・注意をここに縦積みする（操作バーの下） */
 .stack-top {
   position: absolute;
   left: 50%;
-  top: 10px;
+  top: 44px;
   transform: translateX(-50%);
   z-index: 850;
   display: flex;
@@ -1329,77 +1326,61 @@ const telopRows = $derived.by(() => {
   &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 
-/* ---------- レイヤー操作（地図上のインライン） ---------- */
-.layerbox {
+/* ---------- 地図上端の操作バー ---------- */
+/* 縦の箱は地図を侵食するので、上端の横1行に畳む。
+   入り切らないぶんはバーの中で横に流す（つまみは出さない） */
+.mapbar {
   position: absolute;
-  left: 10px;
-  top: 10px;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 800;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   gap: 6px;
-  padding: var(--s2);
-  background: rgba(8, 11, 13, 0.88);
-  border: 1px solid var(--line);
-  max-height: calc(100% - 100px);
-  overflow-y: auto;
+  padding: 5px var(--s2);
+  background: rgba(8, 11, 13, 0.84);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
 }
-.lb-t {
+.mb-t {
+  flex: none;
   font-size: var(--t-micro);
   letter-spacing: var(--ls-label);
   color: var(--ink-faint);
   padding: 0 2px;
 }
-/* 箱の畳み。見出しがそのままトグルになる */
-.lb-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
+.mb-sep { flex: none; width: 1px; align-self: stretch; margin: 2px var(--s1); background: #2a373d; }
+/* 状況の切替。文字だけの小さなセグメント */
+.seg {
+  flex: none;
   font: inherit;
-  font-size: var(--t-micro);
-  letter-spacing: var(--ls-label);
+  font-size: var(--t-small);
+  padding: 4px 10px;
   color: var(--ink-dim);
   background: transparent;
-  border: none;
-  padding: 2px;
+  border: 1px solid #2f3d44;
   cursor: pointer;
-  text-align: left;
-  &:hover { color: var(--ink); }
-  &:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .lb-arrow { margin-left: auto; color: var(--ink-faint); }
-}
-.lb-sep { flex: none; height: 1px; margin: 2px 0; background: #2a373d; }
-/* 状況の切替。4つ横並びの小さなセグメント */
-.lb-row {
-  display: flex;
-  gap: 4px;
-  button {
-    flex: 1;
-    font: inherit;
-    font-size: var(--t-small);
-    padding: 5px 2px;
-    color: var(--ink-dim);
-    background: transparent;
-    border: 1px solid #2f3d44;
-    cursor: pointer;
-    &.on { background: #22303a; color: var(--ink); font-weight: var(--w-bold); border-color: var(--ink-faint); }
-    &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  }
+  white-space: nowrap;
+  &.on { background: #22303a; color: var(--ink); font-weight: var(--w-bold); border-color: var(--ink-faint); }
+  &:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .lyr {
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 13px;
-  min-height: 32px;
+  padding: 4px 10px;
+  min-height: 26px;
   border: 1px solid #2f3d44;
   background: transparent;
   color: var(--ink-dim);
   font: inherit;
   font-size: var(--t-small);
   cursor: pointer;
+  white-space: nowrap;
   i { width: 8px; height: 8px; opacity: 0.35; flex: none; }
   &.on {
     color: var(--ink);
@@ -1862,9 +1843,9 @@ const telopRows = $derived.by(() => {
 /* 指で操作する端末。掴む場所を 44px 目安まで広げる */
 @media (pointer: coarse) {
   .twist { width: 38px; }
-  .lyr { min-height: 42px; }
-  .lb-row button { padding: 10px 2px; }
-  .lb-head { padding: 6px 2px; }
+  /* バーは1行のまま太らせすぎない。38px あれば指で押せる */
+  .lyr { min-height: 38px; }
+  .seg { padding: 9px 12px; }
   .dock button { padding: 11px 16px; }
   .mini { padding: 7px 12px; }
   .logrow,
