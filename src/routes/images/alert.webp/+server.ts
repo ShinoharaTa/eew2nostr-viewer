@@ -155,9 +155,10 @@ function buildMap(
   // 後から描く隣県の塗りが線を半分覆って太さが不均一になるため。
   // 県境は背景色の線で「切れ目」として描く(海と同化して迷いなく読める)
   const boundaryStroke = (1.5 / scale).toFixed(2);
-  // 強調県はくっきりした細い明色アウトライン。隣接する強調県同士でも
-  // 境目が明るい線として残る(ぼかし・グローは使わない)
-  const highlightStroke = (1.2 / scale).toFixed(2);
+  // 強調県のアウトラインは塗りとのコントラストで色を決め(edgeFor)、
+  // 太さは通常の県境と同じにする。同色の県が並んだときの内側の境目も
+  // この線だけが頼りになるため、細くしすぎない
+  const highlightStroke = (1.5 / scale).toFixed(2);
 
   const colorOf = new Map(prefs.map((p) => [p.code, PALETTE[p.color]]));
   const baseFill: string[] = [];
