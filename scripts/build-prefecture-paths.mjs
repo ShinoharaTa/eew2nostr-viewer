@@ -28,6 +28,12 @@ const LON_MAX = 149.2;
 const LAT_MIN = 23.5;
 const LAT_MAX = 46.2;
 
+// 南東海域の除外ボックス。小笠原・硫黄島・鳥島は緯度だけでは沖縄と、
+// 経度だけでは本土と区別できないため、組で判定する。
+// 青ヶ島(緯度32.45)までの伊豆諸島は残す
+const EXCLUDE_LON_MIN = 136;
+const EXCLUDE_LAT_MAX = 32.3;
+
 const VIEW_WIDTH = 1000; // 出力パスの座標系の横幅
 const SIMPLIFY_TOLERANCE = 0.5; // 座標系単位。1200px 描画で 0.6px 相当
 const MIN_RING_AREA = 2.0; // これより小さい島は描画しても見えない
@@ -125,12 +131,15 @@ function ringArea(points) {
 
 const geometries = topo.objects.japan.geometries;
 const prefs = {};
+const bounds = {};
 
 for (const geom of geometries) {
   const code = geom.properties.id;
   const polygons =
     geom.type === "Polygon" ? [geom.arcs] : geom.arcs; // MultiPolygon
   const parts = [];
+  // 発令エリアへの自動ズーム用に県のバウンディングボックスも記録する
+  const bbox = [Infinity, Infinity, -Infinity, -Infinity];
 
   for (const polygon of polygons) {
     for (const ringArcs of polygon) {
@@ -138,12 +147,23 @@ for (const geom of geometries) {
       // リング全体が描画範囲外なら捨てる(小笠原方面)
       const inRange = lonlat.some(
         ([lon, lat]) =>
-          lon >= LON_MIN && lon <= LON_MAX && lat >= LAT_MIN && lat <= LAT_MAX,
+          lon >= LON_MIN &&
+          lon <= LON_MAX &&
+          lat >= LAT_MIN &&
+          lat <= LAT_MAX &&
+          !(lon >= EXCLUDE_LON_MIN && lat <= EXCLUDE_LAT_MAX),
       );
       if (!inRange) continue;
 
       let ring = simplify(lonlat.map(project), SIMPLIFY_TOLERANCE);
       if (ring.length < 3 || ringArea(ring) < MIN_RING_AREA) continue;
+
+      for (const [x, y] of ring) {
+        bbox[0] = Math.min(bbox[0], x);
+        bbox[1] = Math.min(bbox[1], y);
+        bbox[2] = Math.max(bbox[2], x);
+        bbox[3] = Math.max(bbox[3], y);
+      }
 
       const d = ring
         .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
@@ -152,7 +172,10 @@ for (const geom of geometries) {
     }
   }
 
-  if (parts.length) prefs[code] = parts.join("");
+  if (parts.length) {
+    prefs[code] = parts.join("");
+    bounds[code] = bbox.map((v) => Math.round(v * 10) / 10);
+  }
 }
 
 const missing = [];
@@ -167,6 +190,7 @@ const out = {
   viewWidth: VIEW_WIDTH,
   viewHeight: VIEW_HEIGHT,
   prefs,
+  bounds,
 };
 
 writeFileSync(OUT_PATH, JSON.stringify(out));
