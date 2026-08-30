@@ -133,13 +133,17 @@ function buildMap(
   const tx = (width - spanX * scale) / 2 - rx * scale;
   const ty = (height - spanY * scale) / 2 - ry * scale;
 
-  const baseStroke = (1 / scale).toFixed(2);
+  // 塗りと県境を別レイヤーにする。塗りにストロークを同時に付けると、
+  // 後から描く隣県の塗りが線を半分覆って太さが不均一になるため。
+  // 県境は背景色の線で「切れ目」として描く(海と同化して迷いなく読める)
+  const boundaryStroke = (1.5 / scale).toFixed(2);
   // 強調県はくっきりした細い明色アウトライン。隣接する強調県同士でも
   // 境目が明るい線として残る(ぼかし・グローは使わない)
   const highlightStroke = (1.2 / scale).toFixed(2);
 
   const colorOf = new Map(prefs.map((p) => [p.code, PALETTE[p.color]]));
-  const base: string[] = [];
+  const baseFill: string[] = [];
+  const baseBoundary: string[] = [];
   const active: string[] = [];
   for (const [code, d] of Object.entries(paths)) {
     const fill = colorOf.get(Number(code));
@@ -148,13 +152,16 @@ function buildMap(
         `<path d="${d}" fill="${fill}" stroke="${HIGHLIGHT_STROKE}" stroke-width="${highlightStroke}"/>`,
       );
     } else {
-      base.push(`<path d="${d}" fill="${LAND_FILL}" stroke="${LAND_STROKE}" stroke-width="${baseStroke}"/>`);
+      baseFill.push(`<path d="${d}" fill="${LAND_FILL}"/>`);
+      baseBoundary.push(`<path d="${d}" fill="none" stroke="${LAND_STROKE}" stroke-width="${boundaryStroke}"/>`);
     }
   }
 
+  // 描画順: 塗り → 県境 → 強調県(強調県の明色アウトラインを最前面に保つ)
   return (
     `<g transform="translate(${tx} ${ty}) scale(${scale})" fill-rule="evenodd" stroke-linejoin="round">` +
-    base.join("") +
+    baseFill.join("") +
+    baseBoundary.join("") +
     active.join("") +
     `</g>`
   );
