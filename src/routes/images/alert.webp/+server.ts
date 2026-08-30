@@ -1,46 +1,80 @@
 // 発令エリアの地図画像をサーバーサイドでレンダリングする。
 //
-//   GET /images/alert.webp?pref=42&pref=43&key=eew&w=1200&h=630
+//   GET /images/alert.webp?pref=13:red&pref=11:yellow&w=1200&h=630
 //
 // eew2nostr が Nostr 投稿に画像 URL を載せるための API。クエリだけで
 // 画像が一意に決まるので、CDN に長期キャッシュさせて実質静的配信にする。
 //
-// 出典: 地図形状は地球地図日本(国土地理院)由来(scripts/build-prefecture-paths.mjs 参照)
+// 色は「トークン→色」の変換だけを担い、「現象→色」の判定は bot 側の責務
+// (eew2nostr#35, #40 で決めた 色=警戒レベル の6色体系)。
+//
+// 出典: 地図形状は地球地図日本(国土地理院)由来(scripts/build-prefecture-paths.mjs 参照)。
+// 凡例の文字は Noto Sans CJK JP のアウトラインをビルド時にパス化して同梱
+// (serverless に日本語フォントが無いため。scripts/build-legend-glyphs.mjs 参照)
 
 import sharp from "sharp";
-import { SEVERITY_COLOR } from "$lib/bosai/status";
 import mapData from "$lib/server/prefecture-paths.json";
+import glyphs from "$lib/server/legend-glyphs.json";
 import type { RequestHandler } from "./$types";
 
-// 発令種別ごとの強調色。気象庁の配色指針(viewer の SEVERITY_COLOR)に揃える。
-// eew は警報級の赤。tsunami は大津波警報の紫
-const KEY_COLOR: Record<string, string> = {
-  eew: SEVERITY_COLOR.warning,
-  warning: SEVERITY_COLOR.warning,
-  emergency: SEVERITY_COLOR.emergency,
-  advisory: SEVERITY_COLOR.advisory,
-  tsunami: "#b40068",
+// 警戒レベル配色(気象庁「気象情報の配色に関する設定指針」相当)。
+// eew2nostr の議論(#35, #40)で決めた6色をそのまま採用する
+const PALETTE: Record<string, string> = {
+  black: "#0c000c", // レベル5相当(特別警報・氾濫発生)
+  purple: "#aa00aa", // レベル4相当(大津波警報・氾濫危険など)
+  red: "#ff2800", // レベル3相当(警報・津波警報など)
+  orange: "#ff9900", // 震度4〜5強・噴火レベル3
+  yellow: "#f2e700", // レベル2相当(注意報など)
+  white: "#ffffff", // レベル1
 };
 
-// 地の配色は viewer 本体のダークテーマに揃える
-const BG_COLOR = "#1c2529";
-const LAND_FILL = "#2f3d44";
-const LAND_STROKE = "#16242f";
+// 地の配色は viewer 本体のダークテーマに揃える。
+// 県境は背景色系の細線にして、地形が「線で区切られた面」として読めるようにする
+const BG_COLOR = "#161f24";
+const LAND_FILL = "#3d4a53";
+const LAND_STROKE = "#171f24";
+
+// 強調県のアウトラインは塗りとのコントラストで決める。
+// 白縁固定だと 🟡(黄)や ⚪(白)の縁が塗りと同化するため
+const EDGE_LIGHT = "#f2f6f8";
+const EDGE_DARK = "#161f24";
+const EDGE_LUMINANCE_THRESHOLD = 0.4;
+
+// WCAG の相対輝度。明るい塗りかどうかの判定に使う
+function luminance(hex: string): number {
+  const linear = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(1) + 0.7152 * linear(3) + 0.0722 * linear(5);
+}
+
+function edgeFor(fill: string): string {
+  return luminance(fill) > EDGE_LUMINANCE_THRESHOLD ? EDGE_DARK : EDGE_LIGHT;
+}
 
 const DEFAULT_WIDTH = 1200; // OGP 推奨サイズ
 const DEFAULT_HEIGHT = 630;
 const SIZE_MIN = 100;
 const SIZE_MAX = 2000;
-const MARGIN_RATIO = 0.04;
+const MARGIN_RATIO = 0.03;
 
 // 自動ズームの調整値(地図座標系。全体が 1000×1032)。
 // 全国図固定だと沖縄や長崎の離島がプレビューサイズで視認できないため、
-// 既定では発令県の範囲に寄せ、周辺県が入る程度の余白と下限を設ける
-const ZOOM_PAD_RATIO = 0.35;
-const ZOOM_PAD_UNITS = 40;
-const ZOOM_MIN_SPAN = 300;
+// 既定では発令県の範囲に寄せる。余白は隣県が少し見える程度に絞る
+const ZOOM_PAD_RATIO = 0.18;
+const ZOOM_PAD_UNITS = 24;
+const ZOOM_MIN_SPAN = 210;
+
+// 凡例は指定順に最大8件、溢れは「他n県」に丸める
+const LEGEND_MAX_ROWS = 8;
 
 const CACHE_HEADER = "public, max-age=86400, s-maxage=31536000, immutable";
+
+interface PrefSpec {
+  code: number;
+  color: string; // PALETTE のトークン
+}
 
 function bad(message: string): Response {
   return new Response(message, {
@@ -49,19 +83,23 @@ function bad(message: string): Response {
   });
 }
 
-// pref=42&pref=43 と pref=42,43 の両方を受ける。
-// 不正値は無視せずエラーにする。投稿側のバグに気付けなくなるため
-function parsePrefs(values: string[]): number[] | null {
-  const codes = new Set<number>();
+// pref=13:red&pref=11:yellow と pref=13:red,11:yellow の両方を受ける。
+// 色を省略したトークンは key の色になる。不正値は無視せずエラーにする。
+// 投稿側のバグに気付けなくなるため
+function parsePrefs(values: string[], fallbackColor: string): PrefSpec[] | null {
+  const seen = new Map<number, PrefSpec>();
   for (const value of values) {
     for (const token of value.split(",")) {
-      if (!/^\d{1,2}$/.test(token.trim())) return null;
-      const code = Number(token);
+      const m = /^(\d{1,2})(?::([a-z]+))?$/.exec(token.trim());
+      if (!m) return null;
+      const code = Number(m[1]);
       if (code < 1 || code > 47) return null;
-      codes.add(code);
+      const color = m[2] ?? fallbackColor;
+      if (!PALETTE[color]) return null;
+      seen.set(code, { code, color }); // 重複指定は後勝ち
     }
   }
-  return [...codes];
+  return [...seen.values()];
 }
 
 function parseSize(value: string | null, fallback: number): number | null {
@@ -74,14 +112,14 @@ function parseSize(value: string | null, fallback: number): number | null {
 
 // 描画対象の地図範囲 [minX, minY, spanX, spanY] を決める。
 // 発令県があれば、その外接矩形に余白と下限を掛けた範囲へ寄せる
-function regionFor(prefs: number[], wholeMap: boolean): [number, number, number, number] {
+function regionFor(prefs: PrefSpec[], wholeMap: boolean): [number, number, number, number] {
   const { viewWidth, viewHeight } = mapData;
   const bounds: Record<string, number[]> = mapData.bounds;
 
   if (wholeMap || prefs.length === 0) return [0, 0, viewWidth, viewHeight];
 
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
-  for (const code of prefs) {
+  for (const { code } of prefs) {
     const [x1, y1, x2, y2] = bounds[code];
     minX = Math.min(minX, x1);
     minY = Math.min(minY, y1);
@@ -98,14 +136,13 @@ function regionFor(prefs: number[], wholeMap: boolean): [number, number, number,
   return [cx - span / 2, cy - span / 2, span, span];
 }
 
-function buildSvg(
+function buildMap(
   width: number,
   height: number,
-  prefs: number[],
-  color: string,
+  prefs: PrefSpec[],
   wholeMap: boolean,
 ): string {
-  const paths = mapData.prefs as Record<string, string>;
+  const paths: Record<string, string> = mapData.prefs;
   const [rx, ry, spanX, spanY] = regionFor(prefs, wholeMap);
 
   // 対象範囲をキャンバスに収める(余白つき contain・中央寄せ)
@@ -114,49 +151,132 @@ function buildSvg(
   const tx = (width - spanX * scale) / 2 - rx * scale;
   const ty = (height - spanY * scale) / 2 - ry * scale;
 
-  // ストロークは拡縮後に約1pxになるよう地図座標系の太さへ換算する
-  const baseStroke = (1 / scale).toFixed(2);
-  // 同色のハローを2層下に敷いてグローにする。小さな離島(沖縄・長崎など)や
-  // 暗い強調色(特別警報)でもプレビューサイズで視認できるようにするため
-  const haloOuter = (8 / scale).toFixed(2);
-  const haloInner = (4 / scale).toFixed(2);
-  const highlightStroke = (1 / scale).toFixed(2);
+  // 塗りと県境を別レイヤーにする。塗りにストロークを同時に付けると、
+  // 後から描く隣県の塗りが線を半分覆って太さが不均一になるため。
+  // 県境は背景色の線で「切れ目」として描く(海と同化して迷いなく読める)
+  const boundaryStroke = (1.5 / scale).toFixed(2);
+  // 強調県のアウトラインは塗りとのコントラストで色を決め(edgeFor)、
+  // 太さは通常の県境と同じにする。同色の県が並んだときの内側の境目も
+  // この線だけが頼りになるため、細くしすぎない
+  const highlightStroke = (1.5 / scale).toFixed(2);
 
-  const highlighted = new Set(prefs);
-  const base: string[] = [];
-  const halo: string[] = [];
-  const active: string[] = [];
+  const colorOf = new Map(prefs.map((p) => [p.code, PALETTE[p.color]]));
+  const baseFill: string[] = [];
+  const baseBoundary: string[] = [];
+  const activeLight: string[] = [];
+  const activeDark: string[] = [];
   for (const [code, d] of Object.entries(paths)) {
-    if (highlighted.has(Number(code))) {
-      halo.push(
-        `<path d="${d}" fill="none" stroke="${color}" stroke-opacity="0.3" stroke-width="${haloOuter}"/>` +
-          `<path d="${d}" fill="none" stroke="${color}" stroke-opacity="0.6" stroke-width="${haloInner}"/>`,
-      );
-      active.push(`<path d="${d}" fill="${color}" stroke="#e8eef1" stroke-opacity="0.55" stroke-width="${highlightStroke}"/>`);
+    const fill = colorOf.get(Number(code));
+    if (fill) {
+      const edge = edgeFor(fill);
+      const path = `<path d="${d}" fill="${fill}" stroke="${edge}" stroke-width="${highlightStroke}"/>`;
+      // 明るい塗り(暗縁)を後に描く。明縁と暗縁の県が隣接したとき、
+      // 共有辺には両方の塗りに対してコントラストのある暗縁を残すため
+      (edge === EDGE_DARK ? activeDark : activeLight).push(path);
     } else {
-      base.push(`<path d="${d}" fill="${LAND_FILL}" stroke="${LAND_STROKE}" stroke-width="${baseStroke}"/>`);
+      baseFill.push(`<path d="${d}" fill="${LAND_FILL}"/>`);
+      baseBoundary.push(`<path d="${d}" fill="none" stroke="${LAND_STROKE}" stroke-width="${boundaryStroke}"/>`);
     }
   }
 
-  // 描画順: 通常の県 → ハロー → 強調県。強調県の境界線を最前面に出す
+  // 描画順: 塗り → 県境 → 強調県(明縁 → 暗縁)
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
-    `<rect width="${width}" height="${height}" fill="${BG_COLOR}"/>` +
     `<g transform="translate(${tx} ${ty}) scale(${scale})" fill-rule="evenodd" stroke-linejoin="round">` +
-    base.join("") +
-    halo.join("") +
-    active.join("") +
-    `</g></svg>`
+    baseFill.join("") +
+    baseBoundary.join("") +
+    activeLight.join("") +
+    activeDark.join("") +
+    `</g>`
+  );
+}
+
+// 「他n県」を1文字グリフの組み合わせで作る。座標系はフォント座標のままで、
+// 拡縮は呼び出し側の transform に任せる。戻りは [パス群, 送り幅]
+function othersText(count: number): [string, number] {
+  const chars: Record<string, { d: string; w: number }> = glyphs.chars;
+  const parts: string[] = [];
+  let advance = 0;
+  for (const ch of `他${count}県`) {
+    const glyph = chars[ch];
+    parts.push(`<g transform="translate(${advance.toFixed(1)} 0)"><path d="${glyph.d}"/></g>`);
+    advance += glyph.w;
+  }
+  return [parts.join(""), advance];
+}
+
+// 右上の凡例。「●(色丸) 県名」を並べる。地図の邪魔をしないよう
+// 半透明パネルに載せ、行数は上限で丸める
+function buildLegend(width: number, height: number, prefs: PrefSpec[]): string {
+  if (prefs.length === 0) return "";
+
+  const names: Record<string, { d: string; w: number }> = glyphs.names;
+  const unit = Math.min(width, height);
+  const fontSize = Math.min(Math.max(unit * 0.042, 13), 30);
+  const glyphScale = fontSize / glyphs.fontSize;
+  const rowH = fontSize * 1.5;
+  const dotR = fontSize * 0.34;
+  const padX = fontSize * 0.7;
+  const padY = fontSize * 0.55;
+  const dotGap = fontSize * 0.55; // 丸とテキストの間
+
+  const shown = prefs.slice(0, LEGEND_MAX_ROWS);
+  const rest = prefs.length - shown.length;
+
+  interface Row {
+    color: string | null; // null = 「他n県」行
+    body: string; // フォント座標系のパス群
+    advance: number; // フォント座標系の送り幅
+  }
+  const rows: Row[] = shown.map(({ code, color }) => ({
+    color: PALETTE[color],
+    body: `<path d="${names[code].d}"/>`,
+    advance: names[code].w,
+  }));
+  if (rest > 0) {
+    const [body, advance] = othersText(rest);
+    rows.push({ color: null, body, advance });
+  }
+
+  const maxTextW = Math.max(...rows.map((r) => r.advance)) * glyphScale;
+  const panelW = padX * 2 + dotR * 2 + dotGap + maxTextW;
+  const panelH = padY * 2 + rowH * rows.length;
+  const panelX = width - unit * MARGIN_RATIO - panelW;
+  const panelY = unit * MARGIN_RATIO;
+
+  const items: string[] = [];
+  rows.forEach((row, i) => {
+    const cy = panelY + padY + rowH * (i + 0.5);
+    const dotX = panelX + padX + dotR;
+    if (row.color) {
+      // 黒(レベル5)のような暗い丸でも見えるよう、地図と同じ規則で輪郭を添える
+      items.push(
+        `<circle cx="${dotX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${dotR.toFixed(1)}" fill="${row.color}" stroke="${edgeFor(row.color)}" stroke-opacity="0.5" stroke-width="1"/>`,
+      );
+    }
+    const textX = panelX + padX + dotR * 2 + dotGap;
+    // グリフはベースライン原点。行中央から視覚的に揃う位置に置く
+    const baseline = cy + fontSize * 0.36;
+    items.push(
+      `<g transform="translate(${textX.toFixed(1)} ${baseline.toFixed(1)}) scale(${glyphScale.toFixed(4)})" fill="#eef3f5">${row.body}</g>`,
+    );
+  });
+
+  return (
+    `<rect x="${panelX.toFixed(1)}" y="${panelY.toFixed(1)}" width="${panelW.toFixed(1)}" height="${panelH.toFixed(1)}" rx="${(fontSize * 0.35).toFixed(1)}" fill="#0b1216" fill-opacity="0.78" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>` +
+    items.join("")
   );
 }
 
 export const GET: RequestHandler = async ({ url }) => {
-  const prefs = parsePrefs(url.searchParams.getAll("pref"));
-  if (prefs === null) return bad("pref は 1〜47 の都道府県コードで指定してください");
+  const key = url.searchParams.get("key") ?? "red";
+  if (!PALETTE[key]) return bad(`key は ${Object.keys(PALETTE).join(" / ")} のいずれかです`);
 
-  const key = url.searchParams.get("key") ?? "warning";
-  const color = KEY_COLOR[key];
-  if (!color) return bad(`key は ${Object.keys(KEY_COLOR).join(" / ")} のいずれかです`);
+  const prefs = parsePrefs(url.searchParams.getAll("pref"), key);
+  if (prefs === null) {
+    return bad(
+      `pref は「都道府県コード(1〜47)」または「コード:色」で指定してください(色: ${Object.keys(PALETTE).join(" / ")})`,
+    );
+  }
 
   const width = parseSize(url.searchParams.get("w"), DEFAULT_WIDTH);
   const height = parseSize(url.searchParams.get("h"), DEFAULT_HEIGHT);
@@ -167,7 +287,12 @@ export const GET: RequestHandler = async ({ url }) => {
   const view = url.searchParams.get("view") ?? "auto";
   if (view !== "auto" && view !== "japan") return bad("view は auto / japan のいずれかです");
 
-  const svg = buildSvg(width, height, prefs, color, view === "japan");
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<rect width="${width}" height="${height}" fill="${BG_COLOR}"/>` +
+    buildMap(width, height, prefs, view === "japan") +
+    buildLegend(width, height, prefs) +
+    `</svg>`;
   const image = await sharp(Buffer.from(svg)).webp({ quality: 82 }).toBuffer();
 
   return new Response(new Uint8Array(image), {

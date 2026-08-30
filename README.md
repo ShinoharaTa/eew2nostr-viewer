@@ -25,19 +25,35 @@ eew2nostr が Nostr 投稿に画像 URL を載せる用途を想定していま�
 クエリだけで画像が一意に決まるため、CDN に長期キャッシュされます。
 
 ```
-GET /images/alert.webp?pref=42&pref=43&key=eew
+GET /images/alert.webp?pref=13:red&pref=14:red&pref=11:yellow
 ```
 
 | パラメータ | 内容 |
 | --- | --- |
-| `pref` | 都道府県コード(JIS X 0401、1〜47)。繰り返し指定・カンマ区切りの両方可。省略時は強調なしの全国図 |
-| `key` | 強調色。`eew` / `warning` / `emergency` / `advisory` / `tsunami`(既定 `warning`) |
+| `pref` | `コード` または `コード:色`。コードは都道府県コード(JIS X 0401、1〜47)。繰り返し指定・カンマ区切りの両方可。色を省略すると `key` の色。省略時は強調なしの全国図 |
+| `key` | 色を省略した `pref` に使う既定色(既定 `red`) |
 | `w` / `h` | 画像サイズ(100〜2000)。既定は OGP 向けの 1200×630 |
 | `view` | `auto`(既定): 発令県の範囲へ自動ズーム / `japan`: 全国図固定 |
+
+色は警戒レベルの6色トークンで指定します(eew2nostr#35・#40 で決めた
+「色 = 警戒レベル」の体系。どの現象を何色にするかの判定は投稿側の責務)。
+
+| トークン | 色 | 意味 |
+| --- | --- | --- |
+| `black` | #0C000C | レベル5相当(特別警報・氾濫発生) |
+| `purple` | #AA00AA | レベル4相当(大津波警報・氾濫危険など) |
+| `red` | #FF2800 | レベル3相当(警報・津波警報など) |
+| `orange` | #FF9900 | 震度4〜5強・噴火レベル3 |
+| `yellow` | #F2E700 | レベル2相当(注意報など) |
+| `white` | #FFFFFF | レベル1 |
+
+画像の右上には「●(色丸) 県名」の凡例が指定順に最大8件入り、溢れた分は「他n県」に丸められます。
 
 地図形状の出典: [地球地図日本](https://www.gsi.go.jp/kankyochiri/gm_jpn.html)(国土地理院)を変換した
 [dataofjapan/land](https://github.com/dataofjapan/land) の japan.topojson を簡略化して利用しています。
 再生成は `node scripts/build-prefecture-paths.mjs`。
+凡例の文字は Noto Sans CJK JP(SIL Open Font License 1.1)のアウトラインを
+パス化して同梱しています(`node scripts/build-legend-glyphs.mjs` で再生成)。
 
 ## セットアップ
 
