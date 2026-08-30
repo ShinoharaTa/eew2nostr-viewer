@@ -33,7 +33,25 @@ const PALETTE: Record<string, string> = {
 const BG_COLOR = "#161f24";
 const LAND_FILL = "#3d4a53";
 const LAND_STROKE = "#171f24";
-const HIGHLIGHT_STROKE = "#f2f6f8";
+
+// 強調県のアウトラインは塗りとのコントラストで決める。
+// 白縁固定だと 🟡(黄)や ⚪(白)の縁が塗りと同化するため
+const EDGE_LIGHT = "#f2f6f8";
+const EDGE_DARK = "#161f24";
+const EDGE_LUMINANCE_THRESHOLD = 0.4;
+
+// WCAG の相対輝度。明るい塗りかどうかの判定に使う
+function luminance(hex: string): number {
+  const linear = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(1) + 0.7152 * linear(3) + 0.0722 * linear(5);
+}
+
+function edgeFor(fill: string): string {
+  return luminance(fill) > EDGE_LUMINANCE_THRESHOLD ? EDGE_DARK : EDGE_LIGHT;
+}
 
 const DEFAULT_WIDTH = 1200; // OGP 推奨サイズ
 const DEFAULT_HEIGHT = 630;
@@ -144,25 +162,29 @@ function buildMap(
   const colorOf = new Map(prefs.map((p) => [p.code, PALETTE[p.color]]));
   const baseFill: string[] = [];
   const baseBoundary: string[] = [];
-  const active: string[] = [];
+  const activeLight: string[] = [];
+  const activeDark: string[] = [];
   for (const [code, d] of Object.entries(paths)) {
     const fill = colorOf.get(Number(code));
     if (fill) {
-      active.push(
-        `<path d="${d}" fill="${fill}" stroke="${HIGHLIGHT_STROKE}" stroke-width="${highlightStroke}"/>`,
-      );
+      const edge = edgeFor(fill);
+      const path = `<path d="${d}" fill="${fill}" stroke="${edge}" stroke-width="${highlightStroke}"/>`;
+      // 明るい塗り(暗縁)を後に描く。明縁と暗縁の県が隣接したとき、
+      // 共有辺には両方の塗りに対してコントラストのある暗縁を残すため
+      (edge === EDGE_DARK ? activeDark : activeLight).push(path);
     } else {
       baseFill.push(`<path d="${d}" fill="${LAND_FILL}"/>`);
       baseBoundary.push(`<path d="${d}" fill="none" stroke="${LAND_STROKE}" stroke-width="${boundaryStroke}"/>`);
     }
   }
 
-  // 描画順: 塗り → 県境 → 強調県(強調県の明色アウトラインを最前面に保つ)
+  // 描画順: 塗り → 県境 → 強調県(明縁 → 暗縁)
   return (
     `<g transform="translate(${tx} ${ty}) scale(${scale})" fill-rule="evenodd" stroke-linejoin="round">` +
     baseFill.join("") +
     baseBoundary.join("") +
-    active.join("") +
+    activeLight.join("") +
+    activeDark.join("") +
     `</g>`
   );
 }
@@ -225,9 +247,9 @@ function buildLegend(width: number, height: number, prefs: PrefSpec[]): string {
     const cy = panelY + padY + rowH * (i + 0.5);
     const dotX = panelX + padX + dotR;
     if (row.color) {
-      // 黒(レベル5)や白でも見えるように薄い輪郭を添える
+      // 黒(レベル5)のような暗い丸でも見えるよう、地図と同じ規則で輪郭を添える
       items.push(
-        `<circle cx="${dotX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${dotR.toFixed(1)}" fill="${row.color}" stroke="#ffffff" stroke-opacity="0.4" stroke-width="1"/>`,
+        `<circle cx="${dotX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${dotR.toFixed(1)}" fill="${row.color}" stroke="${edgeFor(row.color)}" stroke-opacity="0.5" stroke-width="1"/>`,
       );
     }
     const textX = panelX + padX + dotR * 2 + dotGap;
