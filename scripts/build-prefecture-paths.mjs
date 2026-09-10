@@ -189,6 +189,8 @@ const out = {
   attribution: "地球地図日本(国土地理院) / dataofjapan/land",
   viewWidth: VIEW_WIDTH,
   viewHeight: VIEW_HEIGHT,
+  // 震源マーカーを置くために、利用側でも project() と同じ変換ができるようにする
+  projection: { lonMin: LON_MIN, latMax: LAT_MAX, cosLat0: COS_LAT0, k },
   prefs,
   bounds,
 };

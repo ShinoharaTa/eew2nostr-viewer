@@ -43,8 +43,8 @@ async function loadPrefNames() {
 
 const PREF_NAMES = await loadPrefNames();
 
-// 「他n県」の組み立てに使う1文字グリフ
-const EXTRA_CHARS = "他県0123456789";
+// 「他n県」「震度5強」「震度5弱以上」「M7.3」の組み立てに使う1文字グリフ
+const EXTRA_CHARS = "他県震度弱強以上M.0123456789";
 
 console.log("フォントをダウンロード中...");
 const res = await fetch(FONT_URL);
