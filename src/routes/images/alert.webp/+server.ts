@@ -1,6 +1,7 @@
 // 発令エリアの地図画像をサーバーサイドでレンダリングする。
 //
 //   GET /images/alert.webp?pref=13:red&pref=11:yellow&w=1200&h=630
+//   GET /images/alert.webp?pref=43:purple&epi=32.7545,130.762&int=7&mag=7.3
 //
 // eew2nostr が Nostr 投稿に画像 URL を載せるための API。クエリだけで
 // 画像が一意に決まるので、CDN に長期キャッシュさせて実質静的配信にする。
@@ -69,11 +70,74 @@ const ZOOM_MIN_SPAN = 210;
 // 凡例は指定順に最大8件、溢れは「他n県」に丸める
 const LEGEND_MAX_ROWS = 8;
 
+// 凡例パネルと震源ラベルの共通スタイル。地図の邪魔をしない半透明の板に載せる
+const PANEL_FILL = "#0b1216";
+const PANEL_FILL_OPACITY = 0.78;
+const PANEL_STROKE = "#ffffff";
+const PANEL_STROKE_OPACITY = 0.1;
+const PANEL_TEXT = "#eef3f5";
+
+// 震源の ✕ マーク。県の塗り(黒〜白の6色)のどれに重なっても読めるよう、
+// 暗いハローの上に明色の線を重ねる。サイズは短辺比
+const EPI_ARM_RATIO = 0.026; // ✕ の腕の長さ(中心から端まで)
+const EPI_STROKE_RATIO = 0.0085;
+const EPI_HALO_RATIO = 0.006; // ハローの片側の太さ
+const EPI_MARK_COLOR = "#ffffff";
+const EPI_HALO_COLOR = "#0b1216";
+
+// 震度は気象庁の階級。5・6 は弱/強があるので単独の "5" は受け付けない
+const INTENSITY_LABELS: Record<string, string> = {
+  "1": "1",
+  "2": "2",
+  "3": "3",
+  "4": "4",
+  "5-": "5弱",
+  "5+": "5強",
+  "6-": "6弱",
+  "6+": "6強",
+  "7": "7",
+};
+// エラーメッセージ用の並び。Record のキー順だと整数キーが先に来て
+// "1 / 2 / 3 / 4 / 7 / 5- / ..." になってしまうため明示する
+const INTENSITY_ORDER = ["1", "2", "3", "4", "5-", "5+", "6-", "6+", "7"];
+// 投稿側が漢字表記のまま渡してきても通す
+const INTENSITY_ALIASES: Record<string, string> = {
+  "5弱": "5-",
+  "5強": "5+",
+  "6弱": "6-",
+  "6強": "6+",
+};
+
+// 震源の緯度経度の許容範囲。日本周辺から大きく外れた値は投稿側のバグとみなす
+const EPI_LAT_MIN = 20;
+const EPI_LAT_MAX = 50;
+const EPI_LON_MIN = 118;
+const EPI_LON_MAX = 156;
+
 const CACHE_HEADER = "public, max-age=86400, s-maxage=31536000, immutable";
 
 interface PrefSpec {
   code: number;
   color: string; // PALETTE のトークン
+}
+
+interface Epicenter {
+  lat: number;
+  lon: number;
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// 緯度経度 → 地図座標。scripts/build-prefecture-paths.mjs の project() と
+// 同じ式を、同スクリプトが書き出した projection パラメータで再現する
+function projectLatLon(lat: number, lon: number): [number, number] {
+  const { lonMin, latMax, cosLat0, k } = mapData.projection;
+  return [(lon - lonMin) * cosLat0 * k, (latMax - lat) * k];
 }
 
 function bad(message: string): Response {
@@ -110,13 +174,47 @@ function parseSize(value: string | null, fallback: number): number | null {
   return n;
 }
 
+// epi=32.7545,130.762(緯度,経度)
+function parseEpicenter(value: string): Epicenter | null {
+  const m = /^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/.exec(value.trim());
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  if (lat < EPI_LAT_MIN || lat > EPI_LAT_MAX) return null;
+  if (lon < EPI_LON_MIN || lon > EPI_LON_MAX) return null;
+  return { lat, lon };
+}
+
+// int=7 / int=5- / int=5+ / int=5弱。戻りは表示用の文字列("5強" など)。
+// クエリ中の "+" は空白にデコードされるため、末尾の空白は "+" と解釈する
+// (投稿側が int=5+ を %2B にエスケープしなくても通るように)
+function parseIntensity(value: string): string | null {
+  const token = value.replace(/ +$/, "+").trim();
+  const key = INTENSITY_ALIASES[token] ?? token;
+  return INTENSITY_LABELS[key] ?? null;
+}
+
+// mag=7.3 / mag=M7.3。表示は気象庁に合わせて小数1桁に揃える
+function parseMagnitude(value: string): number | null {
+  const t = value.trim().replace(/^[Mm]/, "");
+  if (!/^\d{1,2}(?:\.\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  if (n < 0 || n > 10) return null;
+  return n;
+}
+
 // 描画対象の地図範囲 [minX, minY, spanX, spanY] を決める。
-// 発令県があれば、その外接矩形に余白と下限を掛けた範囲へ寄せる
-function regionFor(prefs: PrefSpec[], wholeMap: boolean): [number, number, number, number] {
+// 発令県があれば、その外接矩形に余白と下限を掛けた範囲へ寄せる。
+// 震源は海上のことが多く県の外接矩形から外れるので、これも範囲に含める
+function regionFor(
+  prefs: PrefSpec[],
+  epi: Epicenter | null,
+  wholeMap: boolean,
+): [number, number, number, number] {
   const { viewWidth, viewHeight } = mapData;
   const bounds: Record<string, number[]> = mapData.bounds;
 
-  if (wholeMap || prefs.length === 0) return [0, 0, viewWidth, viewHeight];
+  if (wholeMap || (prefs.length === 0 && !epi)) return [0, 0, viewWidth, viewHeight];
 
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
   for (const { code } of prefs) {
@@ -125,6 +223,13 @@ function regionFor(prefs: PrefSpec[], wholeMap: boolean): [number, number, numbe
     minY = Math.min(minY, y1);
     maxX = Math.max(maxX, x2);
     maxY = Math.max(maxY, y2);
+  }
+  if (epi) {
+    const [x, y] = projectLatLon(epi.lat, epi.lon);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
   }
 
   const span = Math.max(
@@ -136,20 +241,30 @@ function regionFor(prefs: PrefSpec[], wholeMap: boolean): [number, number, numbe
   return [cx - span / 2, cy - span / 2, span, span];
 }
 
-function buildMap(
+// 地図座標 → キャンバス座標の変換。地図と震源マーカーで同じものを使う
+interface Viewport {
+  scale: number;
+  tx: number;
+  ty: number;
+}
+
+// 対象範囲をキャンバスに収める(余白つき contain・中央寄せ)
+function viewportFor(
   width: number,
   height: number,
-  prefs: PrefSpec[],
-  wholeMap: boolean,
-): string {
-  const paths: Record<string, string> = mapData.prefs;
-  const [rx, ry, spanX, spanY] = regionFor(prefs, wholeMap);
-
-  // 対象範囲をキャンバスに収める(余白つき contain・中央寄せ)
+  [rx, ry, spanX, spanY]: [number, number, number, number],
+): Viewport {
   const margin = Math.min(width, height) * MARGIN_RATIO;
   const scale = Math.min((width - margin * 2) / spanX, (height - margin * 2) / spanY);
-  const tx = (width - spanX * scale) / 2 - rx * scale;
-  const ty = (height - spanY * scale) / 2 - ry * scale;
+  return {
+    scale,
+    tx: (width - spanX * scale) / 2 - rx * scale,
+    ty: (height - spanY * scale) / 2 - ry * scale,
+  };
+}
+
+function buildMap(prefs: PrefSpec[], { scale, tx, ty }: Viewport): string {
+  const paths: Record<string, string> = mapData.prefs;
 
   // 塗りと県境を別レイヤーにする。塗りにストロークを同時に付けると、
   // 後から描く隣県の塗りが線を半分覆って太さが不均一になるため。
@@ -190,24 +305,40 @@ function buildMap(
   );
 }
 
-// 「他n県」を1文字グリフの組み合わせで作る。座標系はフォント座標のままで、
-// 拡縮は呼び出し側の transform に任せる。戻りは [パス群, 送り幅]
-function othersText(count: number): [string, number] {
+// 「他n県」「震度5強」などを1文字グリフの組み合わせで作る。座標系はフォント
+// 座標のままで、拡縮は呼び出し側の transform に任せる。戻りは [パス群, 送り幅]。
+// 同梱していない文字は落とす(使う文字はパラメータのバリデーションで縛ってある)
+function textPath(text: string): [string, number] {
   const chars: Record<string, { d: string; w: number }> = glyphs.chars;
   const parts: string[] = [];
   let advance = 0;
-  for (const ch of `他${count}県`) {
+  for (const ch of text) {
     const glyph = chars[ch];
+    if (!glyph) continue;
     parts.push(`<g transform="translate(${advance.toFixed(1)} 0)"><path d="${glyph.d}"/></g>`);
     advance += glyph.w;
   }
   return [parts.join(""), advance];
 }
 
+// 半透明パネル。凡例と震源ラベルで見た目を揃える
+function panelRect(r: Rect, radius: number): string {
+  return (
+    `<rect x="${r.x.toFixed(1)}" y="${r.y.toFixed(1)}" width="${r.w.toFixed(1)}" height="${r.h.toFixed(1)}"` +
+    ` rx="${radius.toFixed(1)}" fill="${PANEL_FILL}" fill-opacity="${PANEL_FILL_OPACITY}"` +
+    ` stroke="${PANEL_STROKE}" stroke-opacity="${PANEL_STROKE_OPACITY}" stroke-width="1"/>`
+  );
+}
+
 // 右上の凡例。「●(色丸) 県名」を並べる。地図の邪魔をしないよう
-// 半透明パネルに載せ、行数は上限で丸める
-function buildLegend(width: number, height: number, prefs: PrefSpec[]): string {
-  if (prefs.length === 0) return "";
+// 半透明パネルに載せ、行数は上限で丸める。
+// 震源ラベルがここを避けられるよう、パネルの矩形も返す
+function buildLegend(
+  width: number,
+  height: number,
+  prefs: PrefSpec[],
+): { svg: string; rect: Rect | null } {
+  if (prefs.length === 0) return { svg: "", rect: null };
 
   const names: Record<string, { d: string; w: number }> = glyphs.names;
   const unit = Math.min(width, height);
@@ -233,7 +364,7 @@ function buildLegend(width: number, height: number, prefs: PrefSpec[]): string {
     advance: names[code].w,
   }));
   if (rest > 0) {
-    const [body, advance] = othersText(rest);
+    const [body, advance] = textPath(`他${rest}県`);
     rows.push({ color: null, body, advance });
   }
 
@@ -261,9 +392,87 @@ function buildLegend(width: number, height: number, prefs: PrefSpec[]): string {
     );
   });
 
+  const rect: Rect = { x: panelX, y: panelY, w: panelW, h: panelH };
+  return { svg: panelRect(rect, fontSize * 0.35) + items.join(""), rect };
+}
+
+// 震源の ✕ マークと「震度5強 / M7.3」ラベル。
+// ラベルは ✕ の右→左→下→上 の順に、キャンバスに収まって凡例と重ならない
+// 位置を選ぶ。どれも駄目ならキャンバス内へ寄せて置く
+function buildEpicenter(
+  width: number,
+  height: number,
+  vp: Viewport,
+  epi: Epicenter,
+  lines: string[],
+  avoid: Rect | null,
+): string {
+  const [mapX, mapY] = projectLatLon(epi.lat, epi.lon);
+  const mx = mapX * vp.scale + vp.tx;
+  const my = mapY * vp.scale + vp.ty;
+
+  const unit = Math.min(width, height);
+  const arm = unit * EPI_ARM_RATIO;
+  const core = unit * EPI_STROKE_RATIO;
+  const halo = core + unit * EPI_HALO_RATIO * 2;
+  const p = (v: number) => v.toFixed(1);
+  const cross =
+    `M${p(mx - arm)} ${p(my - arm)}L${p(mx + arm)} ${p(my + arm)}` +
+    `M${p(mx + arm)} ${p(my - arm)}L${p(mx - arm)} ${p(my + arm)}`;
+  const mark =
+    `<path d="${cross}" fill="none" stroke="${EPI_HALO_COLOR}" stroke-opacity="0.85" stroke-width="${p(halo)}" stroke-linecap="round"/>` +
+    `<path d="${cross}" fill="none" stroke="${EPI_MARK_COLOR}" stroke-width="${p(core)}" stroke-linecap="round"/>`;
+
+  if (lines.length === 0) return mark;
+
+  const fontSize = Math.min(Math.max(unit * 0.042, 13), 30);
+  const glyphScale = fontSize / glyphs.fontSize;
+  const rowH = fontSize * 1.34;
+  const padX = fontSize * 0.55;
+  const padY = fontSize * 0.32;
+
+  const rows = lines.map((line) => textPath(line));
+  const panelW = padX * 2 + Math.max(...rows.map(([, w]) => w)) * glyphScale;
+  const panelH = padY * 2 + rowH * rows.length;
+
+  const margin = unit * MARGIN_RATIO;
+  // ✕ の視覚的な端(腕の長さ + ハローの太さの半分)から離す
+  const gap = arm + halo / 2 + unit * 0.016;
+  const candidates: [number, number][] = [
+    [mx + gap, my - panelH / 2], // 右
+    [mx - gap - panelW, my - panelH / 2], // 左
+    [mx - panelW / 2, my + gap], // 下
+    [mx - panelW / 2, my - gap - panelH], // 上
+  ];
+  const fits = ([x, y]: [number, number]) => {
+    if (x < margin || y < margin) return false;
+    if (x + panelW > width - margin || y + panelH > height - margin) return false;
+    if (!avoid) return true;
+    // 凡例とはマージン分あけて判定する。角がぎりぎり接すると窮屈に見えるため
+    return !(
+      x < avoid.x + avoid.w + margin &&
+      x + panelW > avoid.x - margin &&
+      y < avoid.y + avoid.h + margin &&
+      y + panelH > avoid.y - margin
+    );
+  };
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+  const [panelX, panelY] = candidates.find(fits) ?? [
+    clamp(mx + gap, margin, width - margin - panelW),
+    clamp(my - panelH / 2, margin, height - margin - panelH),
+  ];
+
+  const items = rows.map(([body], i) => {
+    // グリフはベースライン原点。行中央から視覚的に揃う位置に置く
+    const baseline = panelY + padY + rowH * (i + 0.5) + fontSize * 0.36;
+    return `<g transform="translate(${p(panelX + padX)} ${p(baseline)}) scale(${glyphScale.toFixed(4)})" fill="${PANEL_TEXT}">${body}</g>`;
+  });
+
+  // ✕ を最後に描く。パネルがキャンバス端へ寄せられて重なっても隠れないように
   return (
-    `<rect x="${panelX.toFixed(1)}" y="${panelY.toFixed(1)}" width="${panelW.toFixed(1)}" height="${panelH.toFixed(1)}" rx="${(fontSize * 0.35).toFixed(1)}" fill="#0b1216" fill-opacity="0.78" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>` +
-    items.join("")
+    panelRect({ x: panelX, y: panelY, w: panelW, h: panelH }, fontSize * 0.35) +
+    items.join("") +
+    mark
   );
 }
 
@@ -287,11 +496,61 @@ export const GET: RequestHandler = async ({ url }) => {
   const view = url.searchParams.get("view") ?? "auto";
   if (view !== "auto" && view !== "japan") return bad("view は auto / japan のいずれかです");
 
+  const epiParam = url.searchParams.get("epi");
+  let epicenter: Epicenter | null = null;
+  if (epiParam !== null) {
+    epicenter = parseEpicenter(epiParam);
+    if (epicenter === null) {
+      return bad(
+        `epi は「緯度,経度」で指定してください(例 epi=32.7545,130.762。緯度 ${EPI_LAT_MIN}〜${EPI_LAT_MAX} / 経度 ${EPI_LON_MIN}〜${EPI_LON_MAX})`,
+      );
+    }
+  }
+
+  const intParam = url.searchParams.get("int");
+  let intensity: string | null = null;
+  if (intParam !== null) {
+    intensity = parseIntensity(intParam);
+    if (intensity === null) {
+      return bad(`int は ${INTENSITY_ORDER.join(" / ")} のいずれかです`);
+    }
+  }
+
+  // EEW の予想震度は上限が決まらないことがある(電文の forecastMaxInt.to = "over")。
+  // 投稿本文の「震度5弱程度以上」と画像の表記が食い違わないようにする
+  const overParam = url.searchParams.get("over");
+  if (overParam !== null && overParam !== "1" && overParam !== "true") {
+    return bad("over は 1 / true で指定してください(予想震度の上限が決まらないとき)");
+  }
+  const over = overParam !== null;
+  if (over && intensity === null) {
+    return bad("over は int(震度)と一緒に指定してください");
+  }
+
+  const magParam = url.searchParams.get("mag");
+  let magnitude: number | null = null;
+  if (magParam !== null) {
+    magnitude = parseMagnitude(magParam);
+    if (magnitude === null) return bad("mag は 0〜10 の数値で指定してください(例 mag=7.3)");
+  }
+
+  // ラベルは ✕ に添えるものなので、震源が無いと置き場所が決まらない
+  if (!epicenter && (intensity !== null || magnitude !== null)) {
+    return bad("int / mag は epi(震源の緯度経度)と一緒に指定してください");
+  }
+
+  const lines: string[] = [];
+  if (intensity !== null) lines.push(`震度${intensity}${over ? "以上" : ""}`);
+  if (magnitude !== null) lines.push(`M${magnitude.toFixed(1)}`);
+
+  const vp = viewportFor(width, height, regionFor(prefs, epicenter, view === "japan"));
+  const legend = buildLegend(width, height, prefs);
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
     `<rect width="${width}" height="${height}" fill="${BG_COLOR}"/>` +
-    buildMap(width, height, prefs, view === "japan") +
-    buildLegend(width, height, prefs) +
+    buildMap(prefs, vp) +
+    legend.svg +
+    (epicenter ? buildEpicenter(width, height, vp, epicenter, lines, legend.rect) : "") +
     `</svg>`;
   const image = await sharp(Buffer.from(svg)).webp({ quality: 82 }).toBuffer();
 
