@@ -4,20 +4,47 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      # 月 1 回に落とす。weekly だと確認する前に翌週の PR に置き換わっていた
+      # (#47 → #50 → #57 → #59 → #62 のうちマージできたのは #50 だけ)。
+      # 脆弱性対応 (security updates) はこのスケジュールと無関係に即時来る。
+      interval: monthly
+      timezone: Asia/Tokyo
+    # リリース直後のバージョンを掴まない。壊れた版や乗っ取り版を避ける猶予。
+    cooldown:
+      default-days: 7
+    # 1 回の確認で捌ける数。minor-and-patch 1 + dev-major 1 + 本番 major 1 が上限。
+    open-pull-requests-limit: 3
+    commit-message:
+      # git log / PR 一覧で人間のコミットと見分けるため。
+      prefix: deps
     groups:
       # パッチとマイナーは 1 PR にまとめる。
-      # メジャーは Vite 6 → 8 のように単独で検証したいので groups に含めない。
       minor-and-patch:
         update-types:
           - minor
           - patch
+      # devDependencies (svelte / vite / eslint / typescript 系) のメジャーも 1 PR にまとめる。
+      # 検証は CI (check / lint / build) で完結するので、まとめても切り分けは CI の失敗箇所で足りる。
+      dev-major:
+        dependency-type: development
+        update-types:
+          - major
+      # dependencies (leaflet / nostr-tools / sharp) のメジャーは意図的に groups に入れない。
+      # sharp は画像 API の中核で CI では実行されず、Vercel Preview で curl して確認が要るため単独 PR にする。
+    ignore:
+      # @types/node のメジャーは Node 本体 (engines.node) に追従させる。
+      # Node を上げるときに engines と一緒に手で上げる。minor / patch は 24.x 内なので通す。
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: ci
     groups:
       actions:
         patterns:
